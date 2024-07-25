@@ -182,38 +182,96 @@ ul#Folders li span {
 
 #MediaContainer {
 	overflow-y: auto;
-	padding: 20px 0 20px 20px;
+	padding: 40px 0 20px 40px;
 	position: relative;
+}
+
+#MediaContainer > h3:nth-child(1) {
+	margin-top: 0;
+}
+
+#MediaContainer > h3 {
+	font-size: 20px;
+}
+
+#MediaContainer > h3 > a {
+	color: #ccc;
 }
 
 #Media {
 	overflow-y: hidden;
+	padding-right: 20px;
+	display: grid;
+    justify-content: space-between;
+	justify-items: center;
+}
+
+body.grid #Media {
+	grid-template-columns: repeat(auto-fill, 163px);
+}
+
+body.grid-wide #Media {
+	grid-template-columns: repeat(auto-fill, 306px);
+}
+
+#Media.media-single-row {
+	height: 225px;
+    display: block;
+}
+
+body.grid #Media.media-single-row {
+	height: 269px;
+    display: block;
 	padding-right: 0;
 }
 
-ul#Media li {
-	float: left;
+#Media.media-single-row > .column {
 	margin-right: 20px;
+	float: left;
+}
+
+#Media:before {
+	display: none;
+}
+
+ul#Media li {
 	margin-bottom: 20px;
 	position: relative;
 	display: block;
 	overflow: hidden;
+	border-radius: 3px;
+}
 
-	/* Note: these are just defaults that fit well at 1080p. JavaScript math takes over when the page is loaded to fit the resolution */
-	width: 308px;
-	height: 173px;
+body.grid ul#Media li {
+	width: 139px;
+}
+
+body.grid-wide ul#Media li {
+	width: 298px;
+	height: auto;
+}
+
+body.dynamic ul#Media li {
+	width: auto;
 }
 
 ul#Media .thumb {
-	/* Note: these are just defaults that fit well at 1080p. JavaScript math takes over when the page is loaded to fit the resolution */
-	max-width: 308px;
-	max-height: 173px;
-	height: 173px;
-	/* Note: intentionally omitting a specific width here so as to avoid distorting icons. */
-	width: auto;
+	height: 168px;
+	width: 298px;
 	display: block;
 	margin: 0 auto;
 	object-fit: contain;
+}
+
+body.grid ul#Media .thumb {
+	max-height: 214px;
+	height: 208px;
+	width: 139px;
+	object-fit: cover;
+}
+
+body.dynamic ul#Media .thumb {
+	width: auto;
 }
 
 ul#Media .caption {
