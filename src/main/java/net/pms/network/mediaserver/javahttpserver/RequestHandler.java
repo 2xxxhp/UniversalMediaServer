@@ -20,8 +20,8 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import java.io.IOException;
 import java.net.InetAddress;
-import net.pms.PMS;
 import net.pms.network.NetworkDeviceFilter;
+import net.pms.network.mediaserver.MediaServer;
 
 public class RequestHandler implements HttpHandler {
 
@@ -39,7 +39,7 @@ public class RequestHandler implements HttpHandler {
 		if (uri.startsWith("/ums/")) {
 			new MediaServerHandler().handle(exchange);
 		} else if (uri.startsWith("/api/")) {
-			new ApiHandler().handle(exchange);
+			new NextcpApiHandler().handle(exchange);
 		} else if (uri.startsWith("/dev/")) {
 			//This is the contendirectory service that can (should) be handled directly by JUPnP
 			new ContentDirectoryHandler().handle(exchange);
@@ -49,7 +49,7 @@ public class RequestHandler implements HttpHandler {
 	}
 
 	private static void sendErrorResponse(final HttpExchange exchange, int code) throws IOException {
-		exchange.getResponseHeaders().set("Server", PMS.get().getServerName());
+		exchange.getResponseHeaders().set("Server", MediaServer.getServerName());
 		exchange.sendResponseHeaders(code, 0);
 	}
 

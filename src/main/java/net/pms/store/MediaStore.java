@@ -18,7 +18,6 @@ package net.pms.store;
 
 import com.sun.jna.Platform;
 import java.io.File;
-import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -66,7 +65,6 @@ import net.pms.store.container.UnattachedFolder;
 import net.pms.store.container.UserVirtualFolder;
 import net.pms.store.container.VideosFeed;
 import net.pms.store.container.VirtualFolder;
-import net.pms.store.container.VirtualFolderDbId;
 import net.pms.store.container.ZippedFile;
 import net.pms.store.item.RealFile;
 import net.pms.store.item.WebAudioStream;
@@ -86,6 +84,7 @@ public class MediaStore extends StoreContainer {
 	// A temp folder for non-xmb items
 	private final UnattachedFolder tempFolder;
 	private final MediaLibrary mediaLibrary;
+	private final DbIdLibrary dbIdLibrary;
 	private DynamicPlaylist dynamicPls;
 	private FolderLimit lim;
 	private MediaMonitor mon;
@@ -99,8 +98,8 @@ public class MediaStore extends StoreContainer {
 		super(renderer, "root", null);
 		tempFolder = new UnattachedFolder(renderer, "Temp");
 		mediaLibrary = new MediaLibrary(renderer);
+		dbIdLibrary = new DbIdLibrary(renderer);
 		setLongId(0);
-		addVirtualMyMusicFolder();
 	}
 
 	public UnattachedFolder getTemp() {
@@ -123,6 +122,15 @@ public class MediaStore extends StoreContainer {
 	 */
 	public MediaLibrary getMediaLibrary() {
 		return mediaLibrary;
+	}
+
+	/**
+	 * Returns the DbIdLibrary.
+	 *
+	 * @return The current {@link DbIdLibrary}.
+	 */
+	public DbIdLibrary getDbIdLibrary() {
+		return dbIdLibrary;
 	}
 
 	@Override
@@ -157,6 +165,8 @@ public class MediaStore extends StoreContainer {
 				addChild(mediaLibrary);
 			}
 		}
+
+		dbIdLibrary.reset(backupChildren);
 
 		if (mon != null) {
 			mon.clearChildren();
@@ -360,7 +370,7 @@ public class MediaStore extends StoreContainer {
 	/**
 	 * Clear all resources in children.
 	 */
-	public void clearBackupChildren() {
+	private void clearBackupChildren() {
 		Iterator<StoreResource> backupResources = backupChildren.iterator();
 		while (backupResources.hasNext()) {
 			StoreResource resource = backupResources.next();
@@ -430,7 +440,10 @@ public class MediaStore extends StoreContainer {
 		}
 		if (objectId.startsWith(DbIdMediaType.GENERAL_PREFIX)) {
 			try {
-				return DbIdResourceLocator.locateResource(renderer, objectId);
+				// this is direct acceded resource.
+				// as we don't know what was it's parent, let find one or fail.
+				DbIdTypeAndIdent typeAndIdent = DbIdMediaType.getTypeIdentByDbid(objectId);
+				return DbIdResourceLocator.getLibraryResourceByDbTypeIdent(renderer, typeAndIdent);
 			} catch (Exception e) {
 				LOGGER.error("", e);
 			}
@@ -445,11 +458,13 @@ public class MediaStore extends StoreContainer {
 		if (id == null) {
 			return null;
 		}
-		if (weakResources.containsKey(id) && weakResources.get(id).get() != null) {
-			return weakResources.get(id).get();
-		} else {
-			// object id not founded, try recreate
-			return recreateResource(id);
+		synchronized (weakResources) {
+			if (weakResources.containsKey(id) && weakResources.get(id).get() != null) {
+				return weakResources.get(id).get();
+			} else {
+				// object id not founded, try recreate
+				return recreateResource(id);
+			}
 		}
 	}
 
@@ -460,65 +475,88 @@ public class MediaStore extends StoreContainer {
 	 * @return
 	 */
 	private StoreResource recreateResource(long id) {
+		LOGGER.trace("try recreating resource with id '{}'", id);
 		List<MediaStoreId> libraryIds = MediaStoreIds.getMediaStoreResourceTree(id);
 		if (!libraryIds.isEmpty()) {
-			for (MediaStoreId libraryId : libraryIds) {
-				if (weakResources.containsKey(libraryId.getId()) && weakResources.get(libraryId.getId()).get() != null) {
-					StoreResource resource = weakResources.get(libraryId.getId()).get();
-					if (resource instanceof StoreContainer container) {
-						container.discoverChildren();
+			synchronized (weakResources) {
+				for (MediaStoreId libraryId : libraryIds) {
+					if (weakResources.containsKey(libraryId.getId()) && weakResources.get(libraryId.getId()).get() != null) {
+						StoreResource resource = weakResources.get(libraryId.getId()).get();
+						if (resource instanceof StoreContainer container) {
+							container.discoverChildren();
+						}
+						if (resource instanceof VirtualFolder container) {
+							container.analyzeChildren();
+						}
 					}
 				}
+				//now that parent folders are discovered, try to get the resource
+				if (weakResources.containsKey(id) && weakResources.get(id).get() != null) {
+					LOGGER.trace("resource with id '{}' recreacted succefully", id);
+					return weakResources.get(id).get();
+				} else {
+					LOGGER.trace("resource with id '{}' is no longer available in the store tree", id);
+				}
 			}
-			//now that parent folders are discovered, try to get the resource
-			if (weakResources.containsKey(id) && weakResources.get(id).get() != null) {
-				return weakResources.get(id).get();
-			}
+		} else {
+			LOGGER.trace("resource with id '{}' was not found in database", id);
 		}
 		return null;
 	}
 
-	public synchronized boolean weakResourceExists(String objectId) {
+	public boolean weakResourceExists(String objectId) {
 		Long id = parseIndex(objectId);
-		return (id != null && weakResources.containsKey(id) && weakResources.get(id).get() != null);
+		synchronized (weakResources) {
+			return (id != null && weakResources.containsKey(id) && weakResources.get(id).get() != null);
+		}
 	}
 
 	public boolean addWeakResource(StoreResource resource) {
 		Long id = MediaStoreIds.getMediaStoreResourceId(resource);
 		if (id != null) {
-			weakResources.put(id, new WeakReference<>(resource));
-			return true;
+			synchronized (weakResources) {
+				weakResources.put(id, new WeakReference<>(resource));
+				return true;
+			}
 		}
 		return false;
 	}
 
 	public void replaceWeakResource(StoreResource a, StoreResource b) {
 		Long id = parseIndex(a.getId());
-		if (id != null && weakResources.containsKey(id)) {
-			weakResources.get(id).clear();
-			weakResources.put(id, new WeakReference<>(b));
+		synchronized (weakResources) {
+			if (id != null && weakResources.containsKey(id)) {
+				weakResources.get(id).clear();
+				weakResources.put(id, new WeakReference<>(b));
+			}
 		}
 	}
 
-	public synchronized void deleteWeakResource(StoreResource resource) {
+	public void deleteWeakResource(StoreResource resource) {
 		Long id = parseIndex(resource.getId());
-		if (id != null && weakResources.containsKey(id)) {
-			weakResources.get(id).clear();
-			weakResources.remove(id);
+		synchronized (weakResources) {
+			if (id != null && weakResources.containsKey(id)) {
+				weakResources.get(id).clear();
+				weakResources.remove(id);
+			}
 		}
 	}
 
-	public synchronized void clearWeakResources() {
-		weakResources.clear();
+	public void clearWeakResources() {
+		synchronized (weakResources) {
+			weakResources.clear();
+		}
 	}
 
-	private synchronized List<StoreResource> findSystemFileResources(File file) {
+	public List<StoreResource> findSystemFileResources(File file) {
 		List<StoreResource> systemFileResources = new ArrayList<>();
-		for (WeakReference<StoreResource> resource : weakResources.values()) {
-			if (resource.get() instanceof SystemFileResource systemFileResource &&
-					file.equals(systemFileResource.getSystemFile()) &&
-					systemFileResource instanceof StoreResource storeResource) {
-				systemFileResources.add(storeResource);
+		synchronized (weakResources) {
+			for (WeakReference<StoreResource> resource : weakResources.values()) {
+				if (resource.get() instanceof SystemFileResource systemFileResource &&
+						file.equals(systemFileResource.getSystemFile()) &&
+						systemFileResource instanceof StoreResource storeResource) {
+					systemFileResources.add(storeResource);
+				}
 			}
 		}
 		return systemFileResources;
@@ -529,27 +567,12 @@ public class MediaStore extends StoreContainer {
 	 * If children is false, then it returns the found object as the only object
 	 * in the list.
 	 *
-	 * TODO: (botijo) This function does a lot more than this!
-	 *
 	 * @param objectId ID to search for.
-	 * @param children State if you want all the children in the returned list.
-	 * @param start
-	 * @param count
-	 * @param renderer Renderer for which to do the actions.
+	 * @param returnChildren State if you want all the children in the returned list.
 	 * @return List of LibraryResource items.
 	 * @throws IOException
 	 */
-	public synchronized List<StoreResource> getResources(String objectId, boolean children, int start, int count) throws IOException {
-		return getResources(objectId, children, start, count, null);
-	}
-
-	public synchronized List<StoreResource> getResources(String objectId, boolean returnChildren, int start, int count,
-		String searchStr) {
-		return getResources(objectId, returnChildren, start, count, searchStr, null);
-	}
-
-	public synchronized List<StoreResource> getResources(String objectId, boolean returnChildren, int start, int count,
-			String searchStr, String lang) {
+	public synchronized List<StoreResource> getResources(String objectId, boolean returnChildren) {
 		ArrayList<StoreResource> resources = new ArrayList<>();
 
 		// Get/create/reconstruct it if it's a Temp item
@@ -558,29 +581,14 @@ public class MediaStore extends StoreContainer {
 			return items != null ? items : resources;
 		}
 
-		// Now strip off the filename
-		objectId = StringUtils.substringBefore(objectId, "/");
-
-		StoreResource resource = null;
-		String[] ids = objectId.split("\\.");
-		if (objectId.equals("0")) {
-			resource = this;
-		} else {
-			if (objectId.startsWith(DbIdMediaType.GENERAL_PREFIX)) {
-				try {
-					resource = DbIdResourceLocator.locateResource(renderer, objectId);
-				} catch (Exception e) {
-					LOGGER.error("", e);
-				}
-			} else {
-				resource = getWeakResource(ids[ids.length - 1]);
-			}
-		}
+		StoreResource resource = getResource(objectId);
 
 		if (resource == null) {
 			// nothing in the cache do a traditional search
-			resource = search(ids, lang);
-			// resource = search(objectId, count, searchStr);
+			// Now strip off the filename
+			objectId = StringUtils.substringBefore(objectId, "/");
+			String[] ids = objectId.split("\\.");
+			resource = search(ids);
 		}
 
 		if (resource != null) {
@@ -597,16 +605,17 @@ public class MediaStore extends StoreContainer {
 			if (!returnChildren) {
 				resources.add(resource);
 				if (resource instanceof StoreContainer storeContainer) {
-					storeContainer.refreshChildrenIfNeeded(searchStr, lang);
+					if (!storeContainer.isDiscovered()) {
+						storeContainer.discover(false);
+					} else {
+						storeContainer.refreshChildrenIfNeeded();
+					}
 				}
 			} else {
 				if (resource instanceof StoreContainer storeContainer) {
-					storeContainer.discover(count, true, searchStr, lang);
+					storeContainer.discover(true);
 
-					if (count == 0) {
-						count = storeContainer.getChildren().size();
-					}
-
+					int count = storeContainer.getChildren().size();
 					if (count > 0) {
 						String systemName = storeContainer.getSystemName();
 						LOGGER.trace("Start of analysis for " + systemName);
@@ -624,7 +633,7 @@ public class MediaStore extends StoreContainer {
 						if (shouldDoAudioTrackSorting(storeContainer)) {
 							sortChildrenWithAudioElements(storeContainer);
 						}
-						for (int i = start; i < start + count && i < storeContainer.getChildren().size(); i++) {
+						for (int i = 0; i < storeContainer.getChildren().size(); i++) {
 							final StoreResource child = storeContainer.getChildren().get(i);
 							if (child != null) {
 								tpe.execute(child);
@@ -651,7 +660,7 @@ public class MediaStore extends StoreContainer {
 		return resources;
 	}
 
-	private StoreResource search(String[] searchIds, String lang) {
+	private StoreResource search(String[] searchIds) {
 		StoreResource resource;
 		for (String searchId : searchIds) {
 			if (searchId.equals("0")) {
@@ -666,27 +675,25 @@ public class MediaStore extends StoreContainer {
 			}
 
 			if (resource instanceof StoreContainer storeContainer) {
-				storeContainer.discover(0, false, null, lang);
+				storeContainer.discover(false);
 			}
 		}
 
 		return getWeakResource(searchIds[searchIds.length - 1]);
 	}
 
-	public void fileRemoved(String filename) {
-		File file = new File(filename);
+	public void fileRemoved(File file) {
 		for (StoreResource storeResource : findSystemFileResources(file)) {
 			storeResource.getParent().removeChild(storeResource);
 			storeResource.getParent().notifyRefresh();
 		}
 	}
 
-	public void fileAdded(String filename) {
-		File file = new File(filename);
+	public void fileAdded(File file) {
 		File parentFile = file.getParentFile();
 		for (StoreResource storeResource : findSystemFileResources(parentFile)) {
 			if (storeResource instanceof VirtualFolder virtualFolder) {
-				virtualFolder.addFile(file);
+				virtualFolder.doRefreshChildren();
 			}
 		}
 	}
@@ -763,12 +770,12 @@ public class MediaStore extends StoreContainer {
 				lcFilename.endsWith(".pls") ||
 				lcFilename.endsWith(".cue") ||
 				lcFilename.endsWith(".ups")) {
-			StoreContainer d = PlaylistFolder.getPlaylist(renderer, lcFilename, file.getAbsolutePath(), 0);
+			StoreContainer d = PlaylistFolder.getPlaylist(renderer, file.getName(), file.getAbsolutePath(), 0);
 			if (d != null) {
 				return d;
 			}
 		} else {
-			ArrayList<String> ignoredFolderNames = renderer.getUmsConfiguration().getIgnoredFolderNames();
+			List<String> ignoredFolderNames = renderer.getUmsConfiguration().getIgnoredFolderNames();
 
 			/* Optionally ignore empty directories */
 			if (file.isDirectory() && renderer.getUmsConfiguration().isHideEmptyFolders() && !FileUtil.isFolderRelevant(file, renderer.getUmsConfiguration())) {
@@ -790,29 +797,6 @@ public class MediaStore extends StoreContainer {
 			}
 		}
 		return null;
-	}
-
-	/**
-	 * TODO: move that under the media library as it should (like tv series)
-	 */
-	private void addVirtualMyMusicFolder() {
-		DbIdTypeAndIdent myAlbums = new DbIdTypeAndIdent(DbIdMediaType.TYPE_MYMUSIC_ALBUM, null);
-		VirtualFolderDbId myMusicFolder = new VirtualFolderDbId(renderer, Messages.getString("MyAlbums"), myAlbums, "");
-		if (PMS.getConfiguration().displayAudioLikesInRootFolder()) {
-			if (!getChildren().contains(myMusicFolder)) {
-				myMusicFolder.setFakeParentId("0");
-				addChild(myMusicFolder, true, false);
-				LOGGER.debug("adding My Music folder to the root of MediaStore");
-			}
-		} else {
-			if (mediaLibrary.getAudioFolder() != null &&
-					mediaLibrary.getAudioFolder().getChildren() != null &&
-					!mediaLibrary.getAudioFolder().getChildren().contains(myMusicFolder)) {
-				myMusicFolder.setFakeParentId(mediaLibrary.getAudioFolder().getId());
-				mediaLibrary.getAudioFolder().addChild(myMusicFolder, true, false);
-				LOGGER.debug("adding My Music folder to the 'Audio' folder of MediaLibrary");
-			}
-		}
 	}
 
 	@Override

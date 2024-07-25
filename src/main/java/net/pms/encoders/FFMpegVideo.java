@@ -28,6 +28,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.annotation.Nonnull;
 import net.pms.Messages;
+import net.pms.configuration.FormatConfiguration;
 import net.pms.configuration.UmsConfiguration;
 import net.pms.encoders.AviSynthFFmpeg.AviSynthScriptGenerationResult;
 import net.pms.formats.Format;
@@ -121,6 +122,7 @@ public class FFMpegVideo extends Engine {
 		List<String> videoFilterOptions = new ArrayList<>();
 		ArrayList<String> filterChain = new ArrayList<>();
 		ArrayList<String> scalePadFilterChain = new ArrayList<>();
+		ArrayList<String> softSubsConfig = new ArrayList<>();
 		final Renderer renderer = params.getMediaRenderer();
 		UmsConfiguration configuration = renderer.getUmsConfiguration();
 		MediaVideo defaultVideoTrack = mediaInfo != null ? mediaInfo.getDefaultVideoTrack() : null;
@@ -148,6 +150,7 @@ public class FFMpegVideo extends Engine {
 				scalePadFilterChain.add(String.format("scale=%1$d:%2$d", renderer.getMaxVideoWidth(), renderer.getMaxVideoHeight()));
 			} else {
 				scalePadFilterChain.add(String.format("scale=iw*min(%1$d/iw\\,%2$d/ih):ih*min(%1$d/iw\\,%2$d/ih)", renderer.getMaxVideoWidth(), renderer.getMaxVideoHeight()));
+				scalePadFilterChain.add(String.format("pad=ceil(iw/4)*4:ceil(ih/4)*4:(ow-iw)/2:(oh-ih)/2"));  // ensure height and width are divisible by 4
 
 				if (keepAR) {
 					scalePadFilterChain.add(String.format("pad=%1$d:%2$d:(%1$d-iw)/2:(%2$d-ih)/2", renderer.getMaxVideoWidth(), renderer.getMaxVideoHeight()));
@@ -220,6 +223,20 @@ public class FFMpegVideo extends Engine {
 					} else {
 						LOGGER.error("External subtitles file \"{}\" is unavailable", params.getSid().getName());
 					}
+				} else if (
+					params.getSid().isEmbedded() &&
+					isRendererSupportsSoftSubsForThisVideo(renderer, defaultVideoTrack, params)
+				) {
+					/**
+					 * For some reason, FFmpeg loads faster if it looks for the subtitles in a
+					 * second input, even if that is the same file as the first input arg.
+					 * @see https://superuser.com/questions/1839735/is-there-a-way-to-reduce-the-initial-startup-time-for-ffmpeg-when-muxing-subtitl#comment2907753_1839735
+					 */
+					softSubsConfig.add("-i");
+					softSubsConfig.add(resource.getFileName());
+					softSubsConfig.add("-c:s");
+					softSubsConfig.add("mov_text");
+					isSubsManualTiming = false;
 				} else {
 					originalSubsFilename = resource.getFileName();
 				}
@@ -312,6 +329,8 @@ public class FFMpegVideo extends Engine {
 		if (!filterChain.isEmpty()) {
 			videoFilterOptions.add("-filter_complex");
 			videoFilterOptions.add(StringUtils.join(filterChain, ","));
+		} else if (!softSubsConfig.isEmpty()) {
+			videoFilterOptions.addAll(softSubsConfig);
 		}
 
 		return videoFilterOptions;
@@ -357,7 +376,7 @@ public class FFMpegVideo extends Engine {
 
 			transcodeOptions.add("-f");
 			transcodeOptions.add("asf");
-		} else { // MPEGPSMPEG2AC3, MPEGTSMPEG2AC3, MPEGTSH264AC3 or MPEGTSH264AAC
+		} else { // MP4H265AC3, MPEGPSMPEG2AC3, MPEGTSMPEG2AC3, MPEGTSH264AC3 or MPEGTSH264AAC
 			final boolean isTsMuxeRVideoEngineActive = EngineFactory.isEngineActive(TsMuxeRVideo.ID);
 
 			// Output audio codec
@@ -371,13 +390,19 @@ public class FFMpegVideo extends Engine {
 			boolean isSubtitlesAndTimeseek = !isDisableSubtitles(params) && params.getTimeSeek() > 0;
 
 			if (
-				configuration.isAudioRemuxAC3() &&
 				params.getAid() != null &&
+				(
+					(
+						configuration.isAudioRemuxAC3() &&
+						params.getAid().isAC3()
+					) ||
+					!params.getAid().isAC3()
+				) &&
 				renderer.isAudioStreamTypeSupportedInTranscodingContainer(params.getAid()) &&
 				!isAviSynthEngine() &&
 				!isSubtitlesAndTimeseek
 			) {
-				// AC-3 and AAC remux
+				// Audio remux if the renderer supports the audio stream inside the transcoding container
 				if (!customFFmpegOptions.contains("-c:a ")) {
 					transcodeOptions.add("-c:a");
 					transcodeOptions.add("copy");
@@ -423,7 +448,7 @@ public class FFMpegVideo extends Engine {
 //				transcodeOptions.add("-c:v");
 //				transcodeOptions.add("copy");
 			if (renderer.isTranscodeToH264() || renderer.isTranscodeToH265()) {
-				if (canMuxVideoWithFFmpeg && renderer.isVideoStreamTypeSupportedInTranscodingContainer(media)) {
+				if (canMuxVideoWithFFmpeg) {
 					if (!customFFmpegOptions.contains("-c:v")) {
 						transcodeOptions.add("-c:v");
 						transcodeOptions.add("copy");
@@ -481,7 +506,16 @@ public class FFMpegVideo extends Engine {
 				if (dtsRemux) {
 					transcodeOptions.add("mpeg2video");
 				} else if (renderer.isTranscodeToMPEGTS()) {
-					transcodeOptions.add("mpegts");
+					transcodeOptions.add(FormatConfiguration.MPEGTS);
+				} else if (renderer.isTranscodeToMP4H265AC3()) {
+					transcodeOptions.add(FormatConfiguration.MP4);
+
+					transcodeOptions.add("-movflags");
+					transcodeOptions.add("frag_keyframe+faststart");
+
+					// this makes FFmpeg output HDR and Dolby Vision metadata
+					transcodeOptions.add("-strict");
+					transcodeOptions.add("unofficial");
 				} else {
 					transcodeOptions.add("vob");
 				}
@@ -797,13 +831,52 @@ public class FFMpegVideo extends Engine {
 		return true;
 	}
 
+	private boolean isRendererSupportsSoftSubsForThisVideo(Renderer renderer, MediaVideo defaultVideoTrack, OutputParams params) {
+		if (!params.getSid().getType().isText()) {
+			return false;
+		}
+
+		int frameRate = 0;
+		if (defaultVideoTrack.getFrameRate() != null) {
+			try {
+				frameRate = (int) Math.round(defaultVideoTrack.getFrameRate());
+			} catch (NumberFormatException e) {
+				LOGGER.debug(
+					"Could not parse framerate \"{}\" for media {}: {}",
+					defaultVideoTrack.getFrameRate(),
+					defaultVideoTrack,
+					e.getMessage()
+				);
+				LOGGER.trace("", e);
+			}
+		}
+		return renderer.isTranscodeToMP4H265AC3() &&
+			renderer.getFormatConfiguration().isFileCompatible(
+				FormatConfiguration.MP4,
+				defaultVideoTrack.getCodec(),
+				params.getAid().getCodec(),
+				params.getAid().getNumberOfChannels(),
+				params.getAid().getSampleRate(),
+				defaultVideoTrack.getBitRate(),
+				frameRate,
+				defaultVideoTrack.getWidth(),
+				defaultVideoTrack.getHeight(),
+				defaultVideoTrack.getBitDepth(),
+				defaultVideoTrack.getHDRFormatForRenderer(),
+				defaultVideoTrack.getHDRFormatCompatibilityForRenderer(),
+				defaultVideoTrack.getExtras(),
+				params.getSid().getType().toString(),
+				true,
+				renderer.getRef()
+			);
+	}
+
 	@Override
 	public synchronized ProcessWrapper launchTranscode(
 		StoreItem resource,
 		MediaInfo media,
 		OutputParams params
 	) throws IOException {
-
 		if (params.isHlsConfigured()) {
 			LOGGER.trace("Switching from FFmpeg to Hls FFmpeg to transcode.");
 			return launchHlsTranscode(resource, media, params);
@@ -846,7 +919,10 @@ public class FFMpegVideo extends Engine {
 		if (
 			configuration.isAudioRemuxAC3() &&
 			params.getAid() != null &&
-			params.getAid().isAC3() &&
+			(
+				params.getAid().isAC3() ||
+				params.getAid().isEAC3()
+			) &&
 			!isAviSynthEngine() &&
 			renderer.isTranscodeToAC3() &&
 			!isXboxOneWebVideo &&
@@ -893,7 +969,7 @@ public class FFMpegVideo extends Engine {
 		 * Defer to MEncoder for subtitles if:
 		 * - MEncoder is enabled and available
 		 * - The setting is enabled
-		 * - There are subtitles to transcode
+		 * - There are subtitles to hardcode because they can't be softcoded
 		 * - The file is not being played via the transcode folder
 		 * - The file is not Dolby Vision, because our MEncoder implementation can't handle that yet
 		 */
@@ -905,8 +981,11 @@ public class FFMpegVideo extends Engine {
 			configuration.isFFmpegDeferToMEncoderForProblematicSubtitles() &&
 			params.getSid().isEmbedded() &&
 			(
-				params.getSid().getType().isText() ||
-				params.getSid().getType() == SubtitleType.VOBSUB
+				(
+					params.getSid().getType().isText() ||
+					params.getSid().getType() == SubtitleType.VOBSUB
+				) &&
+				!isRendererSupportsSoftSubsForThisVideo(renderer, defaultVideoTrack, params)
 			) &&
 			!(defaultVideoTrack != null && defaultVideoTrack.getHDRFormatForRenderer() != null && defaultVideoTrack.getHDRFormatForRenderer().equals("dolbyvision"))
 		) {
@@ -924,7 +1003,7 @@ public class FFMpegVideo extends Engine {
 			} else if (resource.isInsideTranscodeFolder()) {
 				canMuxVideoWithFFmpeg = false;
 				LOGGER.debug(prependFfmpegTraceReason + "the file is being played via a FFmpeg entry in the TRANSCODE folder.");
-			} else if (params.getSid() != null) {
+			} else if (params.getSid() != null && !isRendererSupportsSoftSubsForThisVideo(renderer, defaultVideoTrack, params)) {
 				canMuxVideoWithFFmpeg = false;
 				LOGGER.debug(prependFfmpegTraceReason + "we need to burn subtitles.");
 			} else if (isAviSynthEngine()) {
@@ -942,9 +1021,6 @@ public class FFMpegVideo extends Engine {
 			} else if (!renderer.isResolutionCompatibleWithRenderer(media.getWidth(), media.getHeight())) {
 				canMuxVideoWithFFmpeg = false;
 				LOGGER.debug(prependFfmpegTraceReason + "the resolution is incompatible with the renderer.");
-			} else if (defaultVideoTrack.getHDRFormatForRenderer() != null && defaultVideoTrack.getHDRFormatForRenderer().equals("dolbyvision")) {
-				canMuxVideoWithFFmpeg = false;
-				LOGGER.debug(prependFfmpegTraceReason + "the file is a strict Dolby Vision profile and FFmpeg seems to not preserve Dolby Vision data (worth re-checking periodically).");
 			}
 		}
 
@@ -1019,30 +1095,35 @@ public class FFMpegVideo extends Engine {
 		// Apply any video filters and associated options. These should go
 		// after video input is specified and before output streams are mapped.
 		List<String> videoFilterOptions = getVideoFilterOptions(resource, media, params, isConvertedTo3d);
+		boolean isSoftSubsBeingMuxed = videoFilterOptions.contains("-c:s");
 		if (!videoFilterOptions.isEmpty()) {
 			cmdList.addAll(videoFilterOptions);
-			canMuxVideoWithFFmpeg = false;
-			LOGGER.debug(prependFfmpegTraceReason + "video filters are being applied.");
+			if (!isSoftSubsBeingMuxed && canMuxVideoWithFFmpeg) {
+				canMuxVideoWithFFmpeg = false;
+				LOGGER.debug(prependFfmpegTraceReason + "video filters are being applied.");
+			}
 		}
 
 		// Map the proper audio stream when there are multiple audio streams.
-		// For video the FFMpeg automatically chooses the stream with the highest resolution.
-		if (media.getAudioTracks().size() > 1) {
-			/**
-			 * Use the first video stream that is not an attached picture, video
-			 * thumbnail or cover art.
-			 *
-			 * @see https://web.archive.org/web/20160609011350/https://ffmpeg.org/ffmpeg.html#Stream-specifiers-1
-			 * @todo find a way to automatically select proper stream when media
-			 *       includes multiple video streams
-			 */
-			cmdList.add("-map");
-			cmdList.add("0:V");
+		// For video the FFmpeg automatically chooses the stream with the highest resolution.
+		/**
+		 * Use the first video stream that is not an attached picture, video
+		 * thumbnail or cover art.
+		 *
+		 * @see https://web.archive.org/web/20160609011350/https://ffmpeg.org/ffmpeg.html#Stream-specifiers-1
+		 * @todo find a way to automatically select proper stream when media
+		 *       includes multiple video streams
+		 */
+		cmdList.add("-map");
+		cmdList.add("0:V");
 
+		cmdList.add("-map");
+		cmdList.add("0:a:" + (media.getAudioTracks().indexOf(params.getAid())));
+
+		if (isSoftSubsBeingMuxed) {
 			cmdList.add("-map");
-			cmdList.add("0:a:" + (media.getAudioTracks().indexOf(params.getAid())));
+			cmdList.add("1:s:" + params.getSid().getId());
 		}
-
 		// Now configure the output streams
 
 		// Encoder threads
@@ -1063,7 +1144,9 @@ public class FFMpegVideo extends Engine {
 		}
 
 		if (!override) {
-			cmdList.addAll(getVideoBitrateOptions(resource, media, params, dtsRemux));
+			if (!canMuxVideoWithFFmpeg) {
+				cmdList.addAll(getVideoBitrateOptions(resource, media, params, dtsRemux));
+			}
 
 			String customFFmpegOptions = renderer.getCustomFFmpegOptions();
 
@@ -1180,6 +1263,7 @@ public class FFMpegVideo extends Engine {
 				Thread.sleep(300);
 			} catch (InterruptedException e) {
 				LOGGER.error("Thread interrupted while waiting for named pipe to be created", e);
+				Thread.currentThread().interrupt();
 			}
 		} else {
 			pipe = PlatformUtils.INSTANCE.getPipeProcess(System.currentTimeMillis() + "tsmuxerout.ts");
@@ -1322,6 +1406,7 @@ public class FFMpegVideo extends Engine {
 			try {
 				wait(50);
 			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
 			}
 
 			pipe.deleteLater();
@@ -1334,6 +1419,7 @@ public class FFMpegVideo extends Engine {
 			try {
 				wait(50);
 			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
 			}
 
 			ffAudioPipe.deleteLater();
@@ -1349,6 +1435,7 @@ public class FFMpegVideo extends Engine {
 		} catch (InterruptedException e) {
 			LOGGER.error("Thread interrupted while waiting for transcode to start", e.getMessage());
 			LOGGER.trace("", e);
+			Thread.currentThread().interrupt();
 		}
 		return pw;
 	}
@@ -1528,7 +1615,7 @@ public class FFMpegVideo extends Engine {
 		if (needSubtitle && !needAudio && !needVideo) {
 			cmdList.add("webvtt");
 		} else {
-			cmdList.add("mpegts");
+			cmdList.add(FormatConfiguration.MPEGTS);
 			cmdList.add("-skip_estimate_duration_from_pts");
 			cmdList.add("1");
 			cmdList.add("-use_wallclock_as_timestamps");
@@ -1586,7 +1673,7 @@ public class FFMpegVideo extends Engine {
 		} else if (
 			configuration.isGPUAcceleration() &&
 			!avisynth &&
-			!configuration.getFFmpegGPUDecodingAccelerationMethod().equals(Messages.getString("None_lowercase"))
+			!configuration.getFFmpegGPUDecodingAccelerationMethod().equals("none")
 		) {
 			// GPU decoding method
 			if (configuration.getFFmpegGPUDecodingAccelerationMethod().trim().matches("(auto|cuda|cuvid|d3d11va|dxva2|vaapi|vdpau|videotoolbox|qsv)")) {
@@ -1676,6 +1763,7 @@ public class FFMpegVideo extends Engine {
 			Thread.sleep(300);
 		} catch (InterruptedException e) {
 			LOGGER.error("Thread interrupted while waiting for named pipe to be created", e);
+			Thread.currentThread().interrupt();
 		}
 
 		// Launch the transcode command...
@@ -1685,6 +1773,7 @@ public class FFMpegVideo extends Engine {
 			Thread.sleep(200);
 		} catch (InterruptedException e) {
 			LOGGER.error("Thread interrupted while waiting for transcode to start", e);
+			Thread.currentThread().interrupt();
 		}
 		return pw;
 	}

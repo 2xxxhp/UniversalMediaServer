@@ -189,9 +189,6 @@ public class DidlHelper extends DlnaHelper {
 		) {
 			title = FullyPlayed.addFullyPlayedNamePrefix(title, resource);
 		}
-		if (resource instanceof VirtualFolderDbId) {
-			title = resource.getName();
-		}
 
 		if (item != null) {
 			title = item.resumeStr(title);
@@ -276,7 +273,7 @@ public class DidlHelper extends DlnaHelper {
 
 		MediaType mediaType = mediaInfo != null ? mediaInfo.getMediaType() : MediaType.UNKNOWN;
 		if (item != null && mediaType == MediaType.IMAGE) {
-			appendImage(resource, sb);
+			appendImage(item, sb);
 		} else if (item != null) {
 			int indexCount = 1;
 			if (renderer.isDLNALocalizationRequired()) {
@@ -311,8 +308,8 @@ public class DidlHelper extends DlnaHelper {
 							long offset = item.getResume().getTimeOffset() / 1000;
 							double duration = mediaInfo.getDuration() - offset;
 							addAttribute(sb, "duration", StringUtil.formatDLNADuration(duration));
-						} else if (resource.getSplitRange().isEndLimitAvailable()) {
-							addAttribute(sb, "duration", StringUtil.formatDLNADuration(resource.getSplitRange().getDuration()));
+						} else if (item.getSplitRange().isEndLimitAvailable()) {
+							addAttribute(sb, "duration", StringUtil.formatDLNADuration(item.getSplitRange().getDuration()));
 						} else {
 							addAttribute(sb, "duration", mediaInfo.getDurationString());
 						}
@@ -441,6 +438,8 @@ public class DidlHelper extends DlnaHelper {
 							transcodedExtension = "_transcoded_to.m3u8";
 						} else if (renderer.isTranscodeToMPEGTS()) {
 							transcodedExtension = "_transcoded_to.ts";
+						} else if (renderer.isTranscodeToMP4H265AC3()) {
+							transcodedExtension = "_transcoded_to.mp4";
 						} else if (renderer.isTranscodeToWMV() && !xbox360) {
 							transcodedExtension = "_transcoded_to.wmv";
 						} else {
@@ -457,7 +456,7 @@ public class DidlHelper extends DlnaHelper {
 					}
 				}
 
-				sb.append(resource.getFileURL()).append(transcodedExtension);
+				sb.append(item.getMediaURL()).append(transcodedExtension);
 				closeTag(sb, "res");
 			}
 
@@ -569,7 +568,7 @@ public class DidlHelper extends DlnaHelper {
 	 * @param sb The {@link StringBuilder} to append the elements to.
 	 */
 	@SuppressFBWarnings("SF_SWITCH_NO_DEFAULT")
-	private static void appendImage(StoreResource resource, StringBuilder sb) {
+	private static void appendImage(StoreItem item, StringBuilder sb) {
 		/*
 		 * There's no technical difference between the image itself and the
 		 * thumbnail for an object.item.imageItem, they are all simply listed as
@@ -583,13 +582,13 @@ public class DidlHelper extends DlnaHelper {
 		 * thumbnail. In those situations we simply use the thumbnail for the
 		 * _TN entries and the image for all others.
 		 */
-		final Renderer renderer = resource.getDefaultRenderer();
-		final MediaInfo mediaInfo = resource.getMediaInfo();
+		final Renderer renderer = item.getDefaultRenderer();
+		final MediaInfo mediaInfo = item.getMediaInfo();
 
 		ImageInfo imageInfo = mediaInfo != null ? mediaInfo.getImageInfo() : null;
 		ImageInfo thumbnailImageInf = null;
-		if (resource.getThumbnailImageInfo() != null) {
-			thumbnailImageInf = resource.getThumbnailImageInfo();
+		if (item.getThumbnailImageInfo() != null) {
+			thumbnailImageInf = item.getThumbnailImageInfo();
 		} else if (mediaInfo != null && mediaInfo.getThumbnail() != null && mediaInfo.getThumbnail().getImageInfo() != null) {
 			thumbnailImageInf = mediaInfo.getThumbnail().getImageInfo();
 		}
@@ -653,14 +652,14 @@ public class DidlHelper extends DlnaHelper {
 			if (DLNAImageResElement.isImageProfileSupported(DLNAImageProfile.PNG_LRG, renderer)) {
 				resElements.add(new DLNAImageResElement(DLNAImageProfile.PNG_LRG, null, false));
 			}
-			LOGGER.debug("Warning: Image \"{}\" wasn't parsed when DIDL-Lite was generated", resource.getName());
+			LOGGER.debug("Warning: Image \"{}\" wasn't parsed when DIDL-Lite was generated", item.getName());
 		}
 
 		// Sort the elements by priority
 		Collections.sort(resElements, DLNAImageResElement.getComparator(imageInfo != null ? imageInfo.getFormat() : ImageFormat.JPEG));
 
 		for (DLNAImageResElement resElement : resElements) {
-			addImageResource(resource, sb, resElement);
+			addImageResource(item, sb, resElement);
 		}
 
 		for (DLNAImageResElement resElement : resElements) {
@@ -672,7 +671,7 @@ public class DidlHelper extends DlnaHelper {
 					DLNAImageProfile.JPEG_TN_INT,
 					DLNAImageProfile.PNG_LRG_INT,
 					DLNAImageProfile.PNG_TN_INT
-					-> addAlbumArt(resource, sb, resElement.getProfile());
+					-> addAlbumArt(item, sb, resElement.getProfile());
 			}
 		}
 	}
@@ -821,11 +820,11 @@ public class DidlHelper extends DlnaHelper {
 		if (!resElement.isResolutionKnown() && DLNAImageProfile.JPEG_RES_H_V.equals(resElement.getProfile())) {
 			throw new IllegalArgumentException("Resolution cannot be unknown for DLNAImageProfile.JPEG_RES_H_V");
 		}
-		String url;
+		String url = null;
 		if (resElement.isThumbnail()) {
 			url = resource.getThumbnailURL(resElement.getProfile());
-		} else {
-			url = resource.getMediaURL((DLNAImageProfile.JPEG_RES_H_V.equals(resElement.getProfile()) ?
+		} else if (resource instanceof StoreItem item) {
+			url = item.getMediaURL((DLNAImageProfile.JPEG_RES_H_V.equals(resElement.getProfile()) ?
 				"JPEG_RES" + resElement.getWidth() + "x" + resElement.getHeight() :
 				resElement.getProfile().toString()) + "_");
 		}
@@ -833,7 +832,7 @@ public class DidlHelper extends DlnaHelper {
 			String ciFlag;
 			/*
 			 * Some Panasonic TV's can't handle if the thumbnails have the CI
-			 * flag set to 0 while the main resource doesn't have a CI flag.
+			 * flag set to 0 while the main item doesn't have a CI flag.
 			 * DLNA dictates that a missing CI flag should be interpreted as if
 			 * it were 0, so the result should be the same.
 			 */

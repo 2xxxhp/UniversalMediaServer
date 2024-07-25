@@ -30,19 +30,21 @@ import javax.xml.xpath.XPathExpressionException;
 import net.pms.dlna.DidlHelper;
 import net.pms.network.mediaserver.handlers.SearchRequestHandler;
 import net.pms.network.mediaserver.jupnp.model.meta.UmsRemoteClientInfo;
+import net.pms.network.mediaserver.jupnp.support.contentdirectory.result.Parser;
 import net.pms.network.mediaserver.jupnp.support.contentdirectory.result.Result;
 import net.pms.network.mediaserver.jupnp.support.contentdirectory.result.StoreResourceHelper;
+import net.pms.network.mediaserver.jupnp.support.contentdirectory.result.namespace.didl_lite.item.Item;
 import net.pms.renderers.Renderer;
 import net.pms.store.DbIdMediaType;
-import net.pms.store.DbIdTypeAndIdent;
 import net.pms.store.MediaStatusStore;
 import net.pms.store.MediaStoreIds;
+import net.pms.store.PlaylistManager;
 import net.pms.store.StoreContainer;
 import net.pms.store.StoreItem;
 import net.pms.store.StoreResource;
+import net.pms.store.utils.StoreResourceSorter;
 import net.pms.store.container.MediaLibrary;
 import net.pms.store.container.PlaylistFolder;
-import net.pms.store.container.VirtualFolderDbId;
 import net.pms.util.StringUtil;
 import net.pms.util.UMSUtils;
 import org.apache.commons.text.StringEscapeUtils;
@@ -272,6 +274,7 @@ public class UmsContentDirectoryService {
 		try {
 			orderByCriteria = SortCriterion.valueOf(orderBy);
 		} catch (Exception ex) {
+			LOGGER.debug("Trying to sort on a browse action with '{}' !", orderBy);
 			throw new ContentDirectoryException(ContentDirectoryErrorCode.UNSUPPORTED_SORT_CRITERIA, ex.toString());
 		}
 
@@ -280,7 +283,8 @@ public class UmsContentDirectoryService {
 					objectId,
 					BrowseFlag.valueOrNullOf(browseFlag),
 					filter,
-					firstResult.getValue(), maxResults.getValue(),
+					firstResult.getValue(),
+					maxResults.getValue(),
 					orderByCriteria,
 					remoteClientInfo
 			);
@@ -320,6 +324,7 @@ public class UmsContentDirectoryService {
 		try {
 			sortCriteria = SortCriterion.valueOf(orderBy);
 		} catch (Exception ex) {
+			LOGGER.debug("Trying to sort on a search action with '{}' !", orderBy);
 			throw new ContentDirectoryException(ContentDirectoryErrorCode.UNSUPPORTED_SORT_CRITERIA, ex.toString());
 		}
 
@@ -337,6 +342,174 @@ public class UmsContentDirectoryService {
 			throw ex;
 		} catch (Exception ex) {
 			throw new ContentDirectoryException(ErrorCode.ACTION_FAILED, ex.toString());
+		}
+	}
+
+	@UpnpAction(out = {
+		@UpnpOutputArgument(name = "Result",
+				stateVariable = "A_ARG_TYPE_Result",
+				getterName = "getResult"),
+		@UpnpOutputArgument(name = "ObjectID",
+				stateVariable = "A_ARG_TYPE_ObjectID",
+				getterName = "getObjectID")
+		})
+	public CreateObjectResult createObject(
+			@UpnpInputArgument(name = "ContainerID", stateVariable = "A_ARG_TYPE_ObjectID") String containerId,
+			@UpnpInputArgument(name = "Elements", stateVariable = "A_ARG_TYPE_Result") String elements,
+			RemoteClientInfo remoteClientInfo
+	) throws ContentDirectoryException {
+		try {
+			UmsRemoteClientInfo info = new UmsRemoteClientInfo(remoteClientInfo);
+			Renderer renderer = info.renderer;
+			if (renderer == null) {
+				if (LOGGER.isTraceEnabled()) {
+					LOGGER.trace("Unrecognized media renderer");
+				}
+				return null;
+			}
+			if (!renderer.isAllowed()) {
+				if (LOGGER.isTraceEnabled()) {
+					LOGGER.trace("Recognized media renderer \"{}\" is not allowed", renderer.getRendererName());
+				}
+				return null;
+			}
+
+			StoreResource parentContainer = renderer.getMediaStore().getResource(containerId);
+			if (parentContainer instanceof StoreContainer storeContainer) {
+				Parser parser = new Parser();
+				Result modelItemToAdd = parser.parse(elements);
+				Item itemToCreate = modelItemToAdd.getItems().get(0);
+				if (itemToCreate != null) {
+					StoreResource resource = null;
+					if ("object.item.playlistItem".equalsIgnoreCase(itemToCreate.getUpnpClassName())) {
+						resource = PlaylistManager.createPlaylist(storeContainer, itemToCreate.getTitle());
+					} else {
+						LOGGER.error("CreateObject of unknown upnp:class : " + itemToCreate.getUpnpClassName());
+					}
+					if (resource != null) {
+						String result;
+						if (renderer.getUmsConfiguration().isUpnpJupnpDidl()) {
+							result = getJUPnPDidlResults(List.of(resource), null);
+						} else {
+							result = DidlHelper.getDidlResults(List.of(resource));
+						}
+						if (renderer.getUmsConfiguration().isUpnpDebug()) {
+							logDidlLiteResult(result);
+						}
+						return new CreateObjectResult(result, resource.getId());
+					}
+				}
+				throw new ContentDirectoryException(712, "The specified Elements argument is not supported or is invalid.");
+			} else {
+				throw new ContentDirectoryException(710, "The specified ContainerID is invalid or identifies an object that is not a container.");
+			}
+		} catch (Exception e) {
+			if (e instanceof ContentDirectoryException cde) {
+				throw cde;
+			} else {
+				LOGGER.error("createObject failed", e);
+				throw new ContentDirectoryException(ErrorCode.ACTION_FAILED, e.toString());
+			}
+		}
+	}
+
+	@UpnpAction(out =
+			@UpnpOutputArgument(name = "NewID", stateVariable = "A_ARG_TYPE_ObjectID"))
+	public String createReference(
+			@UpnpInputArgument(name = "ContainerID", stateVariable = "A_ARG_TYPE_ObjectID") String containerId,
+			@UpnpInputArgument(name = "ObjectID", stateVariable = "A_ARG_TYPE_ObjectID") String objectId,
+			RemoteClientInfo remoteClientInfo
+	) throws ContentDirectoryException {
+		try {
+			UmsRemoteClientInfo info = new UmsRemoteClientInfo(remoteClientInfo);
+			Renderer renderer = info.renderer;
+			if (renderer == null) {
+				if (LOGGER.isTraceEnabled()) {
+					LOGGER.trace("Unrecognized media renderer");
+				}
+				return null;
+			}
+			if (!renderer.isAllowed()) {
+				if (LOGGER.isTraceEnabled()) {
+					LOGGER.trace("Recognized media renderer \"{}\" is not allowed", renderer.getRendererName());
+				}
+				return null;
+			}
+
+			StoreResource objectResource = renderer.getMediaStore().getResource(objectId);
+			StoreResource containerResource = renderer.getMediaStore().getResource(containerId);
+			if (objectResource == null) {
+				throw new ContentDirectoryException(ContentDirectoryErrorCode.NO_SUCH_OBJECT);
+			}
+			if (containerResource instanceof StoreContainer storeContainer) {
+				if (storeContainer instanceof PlaylistFolder playlistFolder) {
+					String newID = PlaylistManager.addSongToPlaylist(objectResource, playlistFolder);
+					if (newID != null) {
+						return newID;
+					}
+					throw new ContentDirectoryException(ErrorCode.ACTION_FAILED, "song already in Playlist");
+				} else {
+					//this object create reference is not yet implemented
+					throw new ContentDirectoryException(ErrorCode.OPTIONAL_ACTION);
+				}
+			} else {
+				throw new ContentDirectoryException(710, "the ContainerID argument is invalid or identifies an object that is not a container.");
+			}
+		} catch (Exception e) {
+			if (e instanceof ContentDirectoryException cde) {
+				throw cde;
+			} else {
+				LOGGER.error("createReference failed", e);
+				throw new ContentDirectoryException(ErrorCode.ACTION_FAILED, e.toString());
+			}
+		}
+	}
+
+	@UpnpAction(name = "DestroyObject")
+	public void destroyObject(
+			@UpnpInputArgument(name = "ObjectID", stateVariable = "A_ARG_TYPE_ObjectID") String objectId,
+			RemoteClientInfo remoteClientInfo
+	) throws ContentDirectoryException {
+		try {
+			UmsRemoteClientInfo info = new UmsRemoteClientInfo(remoteClientInfo);
+			Renderer renderer = info.renderer;
+			if (renderer == null) {
+				if (LOGGER.isTraceEnabled()) {
+					LOGGER.trace("Unrecognized media renderer");
+				}
+				throw new ContentDirectoryException(714, "No such resource");
+			}
+			if (!renderer.isAllowed()) {
+				if (LOGGER.isTraceEnabled()) {
+					LOGGER.trace("Recognized media renderer \"{}\" is not allowed", renderer.getRendererName());
+				}
+				throw new ContentDirectoryException(715, "Source resource access denied");
+			}
+
+			StoreResource objectResource = renderer.getMediaStore().getResource(objectId);
+			if (objectResource == null) {
+				throw new ContentDirectoryException(ContentDirectoryErrorCode.NO_SUCH_OBJECT);
+			} else if (objectResource.getParent() instanceof PlaylistFolder playlistFolder) {
+				LOGGER.info("removing song {} from playlist {} ...", objectResource.getDisplayName(), playlistFolder.getDisplayName());
+				if (!PlaylistManager.removeSongFromPlaylist(objectResource, playlistFolder)) {
+					throw new ContentDirectoryException(ContentDirectoryErrorCode.NO_SUCH_OBJECT);
+				}
+			} else if (objectResource instanceof PlaylistFolder playlistFolder) {
+				LOGGER.info("removing playlist {} ...", playlistFolder.getDisplayName());
+				if (!PlaylistManager.deletePlaylistFromDisk(playlistFolder)) {
+					throw new ContentDirectoryException(ErrorCode.ACTION_FAILED, "failed deleting playlist file");
+				}
+			} else {
+				//this object destroy is not yet implemented
+				throw new ContentDirectoryException(ErrorCode.OPTIONAL_ACTION);
+			}
+		} catch (Exception e) {
+			if (e instanceof ContentDirectoryException cde) {
+				throw cde;
+			} else {
+				LOGGER.error("destroyObject failed", e);
+				throw new ContentDirectoryException(ErrorCode.ACTION_FAILED, e.toString());
+			}
 		}
 	}
 
@@ -406,16 +579,14 @@ public class UmsContentDirectoryService {
 
 		List<StoreResource> resources = renderer.getMediaStore().getResources(
 				objectID,
-				browseDirectChildren,
-				(int) startingIndex,
-				(int) requestedCount,
-				null
+				browseDirectChildren
 		);
 
 		List<StoreResource> resultResources = new ArrayList<>();
 		long resourcesCount = 0;
 		long badResourceCount = 0;
 
+		//keep only compatible resources
 		if (resources != null) {
 			resourcesCount = resources.size();
 			for (StoreResource resource : resources) {
@@ -440,22 +611,11 @@ public class UmsContentDirectoryService {
 			}
 		}
 
-		long count = resourcesCount - badResourceCount;
-		long totalMatches;
-		if (browseDirectChildren && renderer.isUseMediaInfo() && renderer.isDLNATreeHack()) {
-			// with the new parser, resources are parsed and analyzed *before*
-			// creating the DLNA tree, every 10 items (the ps3 asks 10 by 10),
-			// so we do not know exactly the total number of items in the DLNA folder to send
-			// (regular resources, plus the #transcode folder, maybe the #imdb one, also resources can be
-			// invalidated and hidden if format is broken or encrypted, etc.).
-			// let's send a fake total size to force the renderer to ask following items
-			totalMatches = startingIndex + requestedCount + 1L; // returns 11 when 10 asked
+		//sort
+		StoreResourceSorter.sortResources(resultResources, sortCriteria);
 
-			// If no more elements, send the startingIndex
-			if (resourcesCount - badResourceCount <= 0) {
-				totalMatches = startingIndex;
-			}
-		} else if (browseDirectChildren) {
+		long totalMatches;
+		if (browseDirectChildren) {
 			StoreContainer parentFolder;
 			if (resources != null && resourcesCount > 0) {
 				parentFolder = resources.get(0).getParent();
@@ -464,6 +624,11 @@ public class UmsContentDirectoryService {
 				if (resource instanceof StoreContainer storeContainer) {
 					parentFolder = storeContainer;
 				} else {
+					if (resource instanceof StoreItem) {
+						LOGGER.debug("Trying to browse direct children on a store item for objectID '{}' !", objectID);
+					} else {
+						LOGGER.debug("Trying to browse direct children on a null object for objectID '{}' !", objectID);
+					}
 					throw new ContentDirectoryException(ContentDirectoryErrorCode.NO_SUCH_OBJECT);
 				}
 			}
@@ -477,16 +642,35 @@ public class UmsContentDirectoryService {
 			totalMatches = 1;
 		}
 
+		//handle startingIndex and requestedCount
+		int fromIndex = (int) startingIndex;
+		int toIndex;
+		if (requestedCount == 0) {
+			toIndex = resultResources.size();
+		} else {
+			toIndex = Math.min(fromIndex + (int) requestedCount, resultResources.size());
+		}
+		long count = (long) toIndex - fromIndex;
+		if (count < 0) {
+			LOGGER.debug("requested objects out of range.");
+			fromIndex = 0;
+			toIndex = 0;
+			count = 0;
+		}
+
 		long containerUpdateID = MediaStoreIds.getSystemUpdateId().getValue();
+		LOGGER.trace("Creating DIDL result");
 		String result;
 		if (renderer.getUmsConfiguration().isUpnpJupnpDidl()) {
-			result = getJUPnPDidlResults(resultResources);
+			result = getJUPnPDidlResults(resultResources.subList(fromIndex, toIndex), filter);
 		} else {
-			result = DidlHelper.getDidlResults(resultResources);
+			result = DidlHelper.getDidlResults(resultResources.subList(fromIndex, toIndex));
 		}
+		LOGGER.trace("DIDL result created");
 		if (renderer.getUmsConfiguration().isUpnpDebug()) {
 			logDidlLiteResult(result);
 		}
+		LOGGER.trace("Returning browse result");
 		return new BrowseResult(result, count, totalMatches, containerUpdateID);
 	}
 
@@ -519,30 +703,22 @@ public class UmsContentDirectoryService {
 
 			int totalMatches = SearchRequestHandler.getLibraryResourceCountFromSQL(SearchRequestHandler.convertToCountSql(searchCriteria, requestType));
 
-			VirtualFolderDbId folder = new VirtualFolderDbId(renderer, "Search Result", new DbIdTypeAndIdent(requestType, ""), "");
 			String sqlFiles = SearchRequestHandler.convertToFilesSql(searchCriteria, startingIndex, requestedCount, orderBy, requestType);
-			for (StoreResource resource : SearchRequestHandler.getLibraryResourceFromSQL(renderer, sqlFiles, requestType)) {
-				folder.addChild(resource);
-			}
-
-			folder.discoverChildren();
-			List<StoreResource> resultResources = new ArrayList<>();
-			for (StoreResource resource : folder.getChildren()) {
-				resource.resolve();
-				resource.setFakeParentId("0");
-				resultResources.add(resource);
-			}
+			List<StoreResource> resultResources = SearchRequestHandler.getLibraryResourceFromSQL(renderer, sqlFiles, requestType);
 
 			long containerUpdateID = MediaStoreIds.getSystemUpdateId().getValue();
+			LOGGER.trace("Creating DIDL result");
 			String result;
 			if (renderer.getUmsConfiguration().isUpnpJupnpDidl()) {
-				result = getJUPnPDidlResults(resultResources);
+				result = getJUPnPDidlResults(resultResources, filter);
 			} else {
 				result = DidlHelper.getDidlResults(resultResources);
 			}
+			LOGGER.trace("DIDL result created");
 			if (renderer.getUmsConfiguration().isUpnpDebug()) {
 				logDidlLiteResult(result);
 			}
+			LOGGER.trace("Returning search result");
 			return new SearchResult(result, resultResources.size(), totalMatches, containerUpdateID);
 		} catch (Exception e) {
 			LOGGER.trace("error transforming searchCriteria to SQL. Fallback to content browsing ...", e);
@@ -601,16 +777,14 @@ public class UmsContentDirectoryService {
 
 		List<StoreResource> resources = renderer.getMediaStore().getResources(
 				containerId,
-				true,
-				(int) startingIndex,
-				(int) requestedCount,
-				searchCriteria
+				true
 		);
 
 		List<StoreResource> resultResources = new ArrayList<>();
 		long resourceCount = 0;
 		long badResourceCount = 0;
 
+		//keep only compatible resources
 		if (resources != null) {
 			if (searchCriteria != null) {
 				UMSUtils.filterResourcesByName(resources, searchCriteria, false, false);
@@ -645,7 +819,6 @@ public class UmsContentDirectoryService {
 			}
 		}
 
-		long count = resourceCount - badResourceCount;
 		long totalMatches;
 		if (renderer.isUseMediaInfo() && renderer.isDLNATreeHack()) {
 			// with the new parser, resources are parsed and analyzed *before*
@@ -669,6 +842,11 @@ public class UmsContentDirectoryService {
 				if (resource instanceof StoreContainer storeContainer) {
 					parentFolder = storeContainer;
 				} else {
+					if (resource instanceof StoreItem) {
+						LOGGER.debug("Trying to search on a store item for containerId '{}' !", containerId);
+					} else {
+						LOGGER.debug("Trying to search on a null object for containerId '{}' !", containerId);
+					}
 					throw new ContentDirectoryException(ContentDirectoryErrorCode.NO_SUCH_OBJECT);
 				}
 			}
@@ -679,16 +857,35 @@ public class UmsContentDirectoryService {
 			}
 		}
 
+		//handle startingIndex and requestedCount
+		int fromIndex = (int) startingIndex;
+		int toIndex;
+		if (requestedCount == 0) {
+			toIndex = resultResources.size();
+		} else {
+			toIndex = Math.min(fromIndex + (int) requestedCount, resultResources.size());
+		}
+		long count = (long) toIndex - fromIndex;
+		if (count < 0) {
+			LOGGER.debug("requested objects out of range.");
+			fromIndex = 0;
+			toIndex = 0;
+			count = 0;
+		}
+
 		long containerUpdateID = MediaStoreIds.getSystemUpdateId().getValue();
 		String result;
+		LOGGER.trace("Creating DIDL result");
 		if (renderer.getUmsConfiguration().isUpnpJupnpDidl()) {
-			result = getJUPnPDidlResults(resultResources);
+			result = getJUPnPDidlResults(resultResources.subList(fromIndex, toIndex), filter);
 		} else {
-			result = DidlHelper.getDidlResults(resultResources);
+			result = DidlHelper.getDidlResults(resultResources.subList(fromIndex, toIndex));
 		}
+		LOGGER.trace("DIDL result created");
 		if (renderer.getUmsConfiguration().isUpnpDebug()) {
 			logDidlLiteResult(result);
 		}
+		LOGGER.trace("Returning search result");
 		return new SearchResult(result, count, totalMatches, containerUpdateID);
 	}
 
@@ -699,7 +896,7 @@ public class UmsContentDirectoryService {
 				formattedResult = "DIDL-Lite result:\n";
 				formattedResult += StringUtil.prettifyXML(result, StandardCharsets.UTF_8, 4);
 			} catch (SAXException | ParserConfigurationException | XPathExpressionException | TransformerException e) {
-				formattedResult = "DIDL-Lite result isn't valid XML, using text formatting: " + e.getMessage()  + "\n";
+				formattedResult = "DIDL-Lite result isn't valid XML, using text formatting: " + e.getMessage() + "\n";
 				formattedResult += "    " + result.replace("\n", "\n    ");
 			}
 			LOGGER.trace(formattedResult);
@@ -797,14 +994,10 @@ public class UmsContentDirectoryService {
 		return response.toString();
 	}
 
-	private static String getJUPnPDidlResults(List<StoreResource> resultResources) {
+	private static String getJUPnPDidlResults(List<StoreResource> resultResources, String filter) {
 		Result didlResult = new Result();
 		for (StoreResource resource : resultResources) {
-			if (resource instanceof StoreContainer container) {
-				didlResult.addObject(StoreResourceHelper.getContainer(container));
-			} else if (resource instanceof StoreItem item) {
-				didlResult.addObject(StoreResourceHelper.getItem(item));
-			}
+			didlResult.addObject(StoreResourceHelper.getBaseObject(resource, filter));
 		}
 		return didlResult.toString();
 	}

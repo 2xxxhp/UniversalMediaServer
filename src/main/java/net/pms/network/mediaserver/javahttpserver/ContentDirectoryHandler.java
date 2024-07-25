@@ -33,6 +33,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
 import java.net.Socket;
+import java.net.URI;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
@@ -222,7 +223,7 @@ public class ContentDirectoryHandler implements HttpHandler {
 	}
 
 	private static void sendErrorResponse(final HttpExchange exchange, final Renderer renderer, int code) throws IOException {
-		exchange.getResponseHeaders().set("Server", PMS.get().getServerName());
+		exchange.getResponseHeaders().set("Server", MediaServer.getServerName());
 		exchange.sendResponseHeaders(code, 0);
 		if (LOGGER.isTraceEnabled()) {
 			logMessageSent(exchange, null, null, renderer);
@@ -230,7 +231,7 @@ public class ContentDirectoryHandler implements HttpHandler {
 	}
 
 	private static void sendResponse(final HttpExchange exchange, final Renderer renderer, int code, String message, String contentType) throws IOException {
-		exchange.getResponseHeaders().set("Server", PMS.get().getServerName());
+		exchange.getResponseHeaders().set("Server", MediaServer.getServerName());
 		exchange.getResponseHeaders().set("Content-Type", contentType);
 		if (message == null || message.length() == 0) {
 			// No response data. Seems we are merely serving up headers.
@@ -263,7 +264,7 @@ public class ContentDirectoryHandler implements HttpHandler {
 
 	private static void sendResponse(final HttpExchange exchange, final Renderer renderer, int code, InputStream inputStream, long cLoverride, boolean writeStream) throws IOException {
 		// There is an input stream to send as a response.
-		exchange.getResponseHeaders().set("Server", PMS.get().getServerName());
+		exchange.getResponseHeaders().set("Server", MediaServer.getServerName());
 		if (inputStream == null) {
 			// No input stream. Seems we are merely serving up headers.
 			exchange.sendResponseHeaders(204, 0);
@@ -566,16 +567,26 @@ public class ContentDirectoryHandler implements HttpHandler {
 
 		List<StoreResource> resources = renderer.getMediaStore().getResources(
 				objectID,
-				browseDirectChildren,
-				startingIndex,
-				requestCount,
-				searchCriteria
+				browseDirectChildren
 		);
 
-		if (searchCriteria != null && resources != null) {
-			UMSUtils.filterResourcesByName(resources, searchCriteria, false, false);
-			if (xbox360 && !resources.isEmpty() && resources.get(0) instanceof StoreContainer libraryContainer) {
-				resources = libraryContainer.getChildren();
+		if (resources != null) {
+			//handle searchCriteria
+			if (searchCriteria != null) {
+				UMSUtils.filterResourcesByName(resources, searchCriteria, false, false);
+				if (xbox360 && !resources.isEmpty() && resources.get(0) instanceof StoreContainer libraryContainer) {
+					resources = libraryContainer.getChildren();
+				}
+			}
+			//handle startingIndex and requestedCount
+			if (startingIndex != 0 || requestCount != 0) {
+				int toIndex;
+				if (requestCount == 0) {
+					toIndex = resources.size();
+				} else {
+					toIndex = Math.min(startingIndex + requestCount, resources.size());
+				}
+				resources = resources.subList(startingIndex, toIndex);
 			}
 		}
 
@@ -631,18 +642,6 @@ public class ContentDirectoryHandler implements HttpHandler {
 
 		response.append("<NumberReturned>").append(filessize - minus).append("</NumberReturned>");
 		response.append(CRLF);
-		StoreContainer parentFolder;
-
-		if (resources != null && filessize > 0) {
-			parentFolder = resources.get(0).getParent();
-		} else {
-			StoreResource resource = renderer.getMediaStore().getResource(objectID);
-			if (resource instanceof StoreContainer libraryContainer) {
-				parentFolder = libraryContainer;
-			} else {
-				throw new ContentDirectoryException(ContentDirectoryErrorCode.NO_SUCH_OBJECT);
-			}
-		}
 
 		if (browseDirectChildren && renderer.isUseMediaInfo() && renderer.isDLNATreeHack()) {
 			// with the new parser, resources are parsed and analyzed *before*
@@ -660,6 +659,22 @@ public class ContentDirectoryHandler implements HttpHandler {
 
 			response.append("<TotalMatches>").append(totalCount).append("</TotalMatches>");
 		} else if (browseDirectChildren) {
+			StoreContainer parentFolder;
+			if (resources != null && filessize > 0) {
+				parentFolder = resources.get(0).getParent();
+			} else {
+				StoreResource resource = renderer.getMediaStore().getResource(objectID);
+				if (resource instanceof StoreContainer libraryContainer) {
+					parentFolder = libraryContainer;
+				} else {
+					if (resource instanceof StoreItem) {
+						LOGGER.debug("Trying to browse direct children on a store item for objectID '{}' !", objectID);
+					} else {
+						LOGGER.debug("Trying to browse direct children on a null object for objectID '{}' !", objectID);
+					}
+					throw new ContentDirectoryException(ContentDirectoryErrorCode.NO_SUCH_OBJECT);
+				}
+			}
 			response.append("<TotalMatches>").append(((parentFolder != null) ? parentFolder.childrenCount() : filessize) - minus).append("</TotalMatches>");
 		} else {
 			// From upnp spec: If BrowseMetadata is specified in the BrowseFlags then TotalMatches = 1
@@ -730,7 +745,7 @@ public class ContentDirectoryHandler implements HttpHandler {
 	}
 
 	private String subscribeHandler(HttpExchange exchange, String uri, String soapaction) throws IOException {
-		exchange.getResponseHeaders().set("SID", PMS.get().usn());
+		exchange.getResponseHeaders().set("SID", MediaServer.getUniqueDeviceName());
 
 		/**
 		 * Requirement [7.2.22.1]: UPnP devices must send events to all properly
@@ -745,14 +760,14 @@ public class ContentDirectoryHandler implements HttpHandler {
 			String cb = soapaction.replace("<", "").replace(">", "");
 
 			try {
-				URL soapActionUrl = new URL(cb);
+				URL soapActionUrl = URI.create(cb).toURL();
 				String addr = soapActionUrl.getHost();
 				int port = soapActionUrl.getPort();
 				try (
 						Socket sock = new Socket(addr, port); OutputStream out = sock.getOutputStream()) {
 					out.write(("NOTIFY /" + uri + " HTTP/1.1").getBytes(StandardCharsets.UTF_8));
 					out.write(CRLF.getBytes(StandardCharsets.UTF_8));
-					out.write(("SID: " + PMS.get().usn()).getBytes(StandardCharsets.UTF_8));
+					out.write(("SID: " + MediaServer.getUniqueDeviceName()).getBytes(StandardCharsets.UTF_8));
 					out.write(CRLF.getBytes(StandardCharsets.UTF_8));
 					out.write(("SEQ: " + 0).getBytes(StandardCharsets.UTF_8));
 					out.write(CRLF.getBytes(StandardCharsets.UTF_8));
@@ -764,7 +779,7 @@ public class ContentDirectoryHandler implements HttpHandler {
 					out.write(CRLF.getBytes(StandardCharsets.UTF_8));
 					out.flush();
 				}
-			} catch (MalformedURLException ex) {
+			} catch (IllegalArgumentException | MalformedURLException ex) {
 				LOGGER.debug("Cannot parse address and port from soap action \"" + soapaction + "\"", ex);
 			}
 		} else {
@@ -783,7 +798,7 @@ public class ContentDirectoryHandler implements HttpHandler {
 	private static String notifyHandler(HttpExchange exchange) {
 		exchange.getResponseHeaders().set("NT", "upnp:event");
 		exchange.getResponseHeaders().set("NTS", "upnp:propchange");
-		exchange.getResponseHeaders().set("SID", PMS.get().usn());
+		exchange.getResponseHeaders().set("SID", MediaServer.getUniqueDeviceName());
 		exchange.getResponseHeaders().set("SEQ", "0");
 		StringBuilder response = new StringBuilder();
 		response.append("<e:propertyset xmlns:e=\"urn:schemas-upnp-org:event-1-0\">");

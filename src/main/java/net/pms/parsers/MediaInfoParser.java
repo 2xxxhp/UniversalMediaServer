@@ -738,7 +738,8 @@ public class MediaInfoParser {
 			format = FormatConfiguration.QCELP;
 		} else if (
 			value.matches("(?i)(dv)|(cdv.?)|(dc25)|(dcap)|(dvc.?)|(dvs.?)|(dvrs)|(dv25)|(dv50)|(dvan)|(dvh.?)|(dvis)|(dvl.?)|(dvnm)|(dvp.?)|(mdvf)|(pdvc)|(r411)|(r420)|(sdcc)|(sl25)|(sl50)|(sldv)") &&
-			!value.contains("dvhe")
+			!value.contains("dvhe") &&
+			!value.contains("dvh1")
 		) {
 			format = FormatConfiguration.DV;
 		} else if (value.contains("mpeg video")) {
@@ -777,7 +778,13 @@ public class MediaInfoParser {
 			// only for audio files:
 			format = FormatConfiguration.MP2;
 			media.setContainer(FormatConfiguration.MP2);
-		} else if (value.equals("ma") || value.equals("ma / core") || value.equals("134")) {
+		} else if (
+			value.equals("ma") ||
+			value.equals("ma / core") ||
+			value.equals("x / ma / core") ||
+			value.equals("imax / x / ma / core") ||
+			value.equals("134")
+		) {
 			if (audio.getCodec() != null && audio.getCodec().equals(FormatConfiguration.DTS)) {
 				format = FormatConfiguration.DTSHD;
 			}
@@ -1187,8 +1194,16 @@ public class MediaInfoParser {
 		MediaAudioMetadata audioMetadata = new MediaAudioMetadata();
 		audioMetadata.setSongname(StreamContainer.getTrack(MI, 0));
 		audioMetadata.setAlbum(StreamContainer.getAlbum(MI, 0));
-		audioMetadata.setAlbumArtist(StreamContainer.getAlbumPerformer(MI, 0));
-		audioMetadata.setArtist(StreamContainer.getPerformer(MI, 0));
+		String albumArtists = MI.get(StreamKind.GENERAL, 0, "ALBUM_ARTISTS");
+		if (StringUtils.isAllBlank(albumArtists)) {
+			albumArtists = StreamContainer.getAlbumPerformer(MI, 0);
+		}
+		audioMetadata.setAlbumArtist(albumArtists);
+		String artists = MI.get(StreamKind.GENERAL, 0, "ARTISTS");
+		if (StringUtils.isAllBlank(artists)) {
+			artists = StreamContainer.getPerformer(MI, 0);
+		}
+		audioMetadata.setArtist(artists);
 		audioMetadata.setGenre(StreamContainer.getGenre(MI, 0));
 		audioMetadata.setComposer(StreamContainer.getComposer(MI, 0));
 		audioMetadata.setConductor(StreamContainer.getConductor(MI, 0));

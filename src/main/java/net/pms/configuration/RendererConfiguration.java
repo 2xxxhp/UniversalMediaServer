@@ -28,7 +28,6 @@ import java.util.Objects;
 import java.util.StringTokenizer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import net.pms.Messages;
 import net.pms.PMS;
 import net.pms.formats.Format;
 import net.pms.formats.Format.Identifier;
@@ -161,6 +160,7 @@ public class RendererConfiguration extends BaseConfiguration {
 	/**
 	 * video transcoding options.
 	 */
+	private static final String MP4H265AC3 = "MP4-H265-AC3";
 	private static final String MPEGTSH264AAC = "MPEGTS-H264-AAC";
 	private static final String MPEGTSH264AC3 = "MPEGTS-H264-AC3";
 	private static final String MPEGTSH265AAC = "MPEGTS-H265-AAC";
@@ -457,6 +457,10 @@ public class RendererConfiguration extends BaseConfiguration {
 		return getVideoTranscode().equals(TRANSCODE_TO_WMV);
 	}
 
+	public boolean isTranscodeToMP4H265AC3() {
+		return getVideoTranscode().equals(MP4H265AC3);
+	}
+
 	public boolean isTranscodeToMPEGPSMPEG2AC3() {
 		String videoTranscode = getVideoTranscode();
 		return videoTranscode.equals(MPEGPSMPEG2AC3);
@@ -503,7 +507,7 @@ public class RendererConfiguration extends BaseConfiguration {
 	 * @return whether to use the AC-3 audio codec for transcoded video
 	 */
 	public boolean isTranscodeToAC3() {
-		return isTranscodeToMPEGPSMPEG2AC3() || isTranscodeToMPEGTSMPEG2AC3() || isTranscodeToMPEGTSH264AC3() || isTranscodeToMPEGTSH265AC3() || isTranscodeToHLSMPEGTSH264AC3();
+		return isTranscodeToMP4H265AC3() || isTranscodeToMPEGPSMPEG2AC3() || isTranscodeToMPEGTSMPEG2AC3() || isTranscodeToMPEGTSH264AC3() || isTranscodeToMPEGTSH265AC3() || isTranscodeToHLSMPEGTSH264AC3();
 	}
 
 	/**
@@ -524,7 +528,7 @@ public class RendererConfiguration extends BaseConfiguration {
 	 * @return whether to use the H.265 video codec for transcoded video
 	 */
 	public boolean isTranscodeToH265() {
-		return isTranscodeToMPEGTSH265AAC() || isTranscodeToMPEGTSH265AC3();
+		return isTranscodeToMP4H265AC3() || isTranscodeToMPEGTSH265AAC() || isTranscodeToMPEGTSH265AC3();
 	}
 
 	/**
@@ -535,11 +539,17 @@ public class RendererConfiguration extends BaseConfiguration {
 	}
 
 	/**
-	 * @return whether to use the MPEG-TS container for transcoded video
+	 * @return the container for transcoded video
 	 */
 	public String getTranscodingContainer() {
 		if (isTranscodeToMPEGTS()) {
 			return FormatConfiguration.MPEGTS;
+		}
+		if (isTranscodeToMP4H265AC3()) {
+			return FormatConfiguration.MP4;
+		}
+		if (isTranscodeToWMV()) {
+			return FormatConfiguration.WMV;
 		}
 		return FormatConfiguration.MPEGPS;
 	}
@@ -666,6 +676,8 @@ public class RendererConfiguration extends BaseConfiguration {
 					matchedMimeType = getFormatConfiguration().getMatchedMIMEtype(FormatConfiguration.MPEGTS, FormatConfiguration.H264, FormatConfiguration.AAC_LC);
 				} else if (isTranscodeToMPEGTSH265AC3()) {
 					matchedMimeType = getFormatConfiguration().getMatchedMIMEtype(FormatConfiguration.MPEGTS, FormatConfiguration.H265, FormatConfiguration.AC3);
+				} else if (isTranscodeToMP4H265AC3()) {
+					matchedMimeType = getFormatConfiguration().getMatchedMIMEtype(FormatConfiguration.MP4, FormatConfiguration.H265, FormatConfiguration.AC3);
 				} else if (isTranscodeToMPEGTSH265AAC()) {
 					matchedMimeType = getFormatConfiguration().getMatchedMIMEtype(FormatConfiguration.MPEGTS, FormatConfiguration.H265, FormatConfiguration.AAC_LC);
 				} else if (isTranscodeToMPEGTSMPEG2AC3()) {
@@ -827,7 +839,7 @@ public class RendererConfiguration extends BaseConfiguration {
 	}
 
 	public String getConfName() {
-		return getString(KEY_RENDERER_NAME, Messages.getString("UnknownRenderer"));
+		return getString(KEY_RENDERER_NAME, "UnknownRenderer");
 	}
 
 	/**
@@ -1269,11 +1281,10 @@ public class RendererConfiguration extends BaseConfiguration {
 	 * @param resource The {@link StoreItem} information parsed from the
 	 * 				media file.
 	 * @param format The {@link Format} to test compatibility for.
-	 * @param configuration The {@link UmsConfiguration} to use while evaluating compatibility
 	 * @return True if the renderer natively supports the format, false
 	 * 				otherwise.
 	 */
-	public boolean isCompatible(StoreItem resource, Format format, UmsConfiguration configuration) {
+	public boolean isCompatible(StoreItem resource, Format format) {
 		MediaInfo mediaInfo;
 		if (resource != null) {
 			mediaInfo = resource.getMediaInfo();
@@ -1281,15 +1292,11 @@ public class RendererConfiguration extends BaseConfiguration {
 			mediaInfo = null;
 		}
 
-		if (configuration == null) {
-			configuration = umsConfiguration;
-		}
-
 		if (
-			configuration != null &&
-			(configuration.isDisableTranscoding() ||
+			umsConfiguration != null &&
+			(umsConfiguration.isDisableTranscoding() ||
 			(format != null &&
-			format.skip(configuration.getDisableTranscodeForExtensions())))
+			format.skip(umsConfiguration.getDisableTranscodeForExtensions())))
 		) {
 			return true;
 		}
@@ -1329,22 +1336,6 @@ public class RendererConfiguration extends BaseConfiguration {
 		}
 
 		return format != null && format.skip(getStreamedExtensions());
-	}
-
-	/**
-	 * Returns whether or not the renderer can handle the given format
-	 * natively, based on its configuration in the renderer.conf. If it can
-	 * handle a format natively, content can be streamed to the renderer. If
-	 * not, content should be transcoded before sending it to the renderer.
-	 *
-	 * @param resource The {@link StoreItem} information parsed from the
-	 * 				media file.
-	 * @param format The {@link Format} to test compatibility for.
-	 * @return True if the renderer natively supports the format, false
-	 * 				otherwise.
-	 */
-	public boolean isCompatible(StoreItem resource, Format format) {
-		return isCompatible(resource, format, null);
 	}
 
 	public int getAutoPlayTmo() {

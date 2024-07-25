@@ -22,7 +22,7 @@ import net.pms.PMS;
 import net.pms.configuration.UmsConfiguration;
 import net.pms.image.ImageFormat;
 import net.pms.network.HTTPResource;
-import net.pms.network.IServerSentEvents;
+import net.pms.network.webguiserver.IEventSourceClient;
 import net.pms.renderers.Renderer;
 import net.pms.renderers.devices.players.BasicPlayer;
 import net.pms.renderers.devices.players.WebGuiPlayer;
@@ -50,7 +50,7 @@ public class WebGuiRenderer extends Renderer {
 
 	private final int browser;
 	private final String subLang;
-	private IServerSentEvents sse;
+	private IEventSourceClient sse;
 	private StartStopListenerDelegate startStop;
 
 	public WebGuiRenderer(String uuid, int userId, String userAgent, String subLang) throws ConfigurationException, InterruptedException {
@@ -131,16 +131,16 @@ public class WebGuiRenderer extends Renderer {
 	@Override
 	public String getRendererIcon() {
 		return switch (browser) {
-			case CHROME -> "chrome.png";
-			case MSIE -> "internetexplorer.png";
-			case FIREFOX -> "firefox.png";
-			case SAFARI -> "safari.png";
+			case CHROME -> "chrome.svg";
+			case MSIE -> "internetexplorer.svg";
+			case FIREFOX -> "firefox.svg";
+			case SAFARI -> "safari.svg";
 			case PS4 -> "ps4.png";
 			case XBOX1 -> "xbox-one.png";
-			case OPERA -> "opera.png";
-			case EDGE -> "edge.png";
-			case CHROMIUM -> "chromium.png";
-			case VIVALDI -> "vivaldi.png";
+			case OPERA -> "opera.svg";
+			case EDGE -> "edge.svg";
+			case CHROMIUM -> "chromium.svg";
+			case VIVALDI -> "vivaldi.svg";
 			default -> super.getRendererIcon();
 		};
 	}
@@ -220,7 +220,7 @@ public class WebGuiRenderer extends Renderer {
 		updateServerSentEventsActive();
 	}
 
-	public void addServerSentEvents(IServerSentEvents sse) {
+	public void addServerSentEvents(IEventSourceClient sse) {
 		if (this.sse != null && this.sse.isOpened()) {
 			this.sse.close();
 		}

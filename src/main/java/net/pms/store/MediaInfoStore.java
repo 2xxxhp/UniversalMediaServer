@@ -65,7 +65,13 @@ public class MediaInfoStore {
 			connection = MediaDatabase.getConnectionIfAvailable();
 			if (connection != null) {
 				File file = new File(filename);
-				return MediaTableFiles.getMediaInfo(connection, filename, file.lastModified());
+				MediaInfo mediaInfo = MediaTableFiles.getMediaInfo(connection, filename, file.lastModified());
+				if (mediaInfo != null && mediaInfo.isMediaParsed() && mediaInfo.getMimeType() != null) {
+					synchronized (STORE) {
+						STORE.put(filename, new WeakReference<>(mediaInfo));
+					}
+				}
+				return mediaInfo;
 			}
 		} catch (IOException | SQLException e) {
 			LOGGER.debug("Error while getting cached information about {}: {}", filename, e.getMessage());
@@ -81,6 +87,7 @@ public class MediaInfoStore {
 			if (STORE.containsKey(filename) && STORE.get(filename).get() != null) {
 				return STORE.get(filename).get();
 			}
+			LOGGER.trace("Store do not yet contains MediaInfo for {}", filename);
 			MediaInfo mediaInfo = null;
 			Connection connection = null;
 			InputFile input = new InputFile();
@@ -275,11 +282,12 @@ public class MediaInfoStore {
 						if (connection != null) {
 							if (videoMetadata.isTvEpisode() && videoMetadata.getTvSeriesId() == null) {
 								String tvSeriesTitle = videoMetadata.getSeriesMetadata().getTitle();
-								Long tvSeriesId = MediaTableTVSeries.getIdBySimilarTitle(connection, tvSeriesTitle);
+								Integer tvSeriesYear = videoMetadata.getSeriesMetadata().getStartYear();
+								Long tvSeriesId = MediaTableTVSeries.getIdBySimilarTitle(connection, tvSeriesTitle, tvSeriesYear);
 								if (tvSeriesId == null) {
 									// Creates a minimal TV series row with just the title, that
 									// might be enhanced later by the API
-									tvSeriesId = MediaTableTVSeries.set(connection, tvSeriesTitle);
+									tvSeriesId = MediaTableTVSeries.set(connection, tvSeriesTitle, tvSeriesYear);
 								}
 								TvSeriesMetadata tvSeriesMetadata = MediaTableTVSeries.getTvSeriesMetadata(connection, tvSeriesId);
 								videoMetadata.setSeriesMetadata(tvSeriesMetadata);

@@ -23,6 +23,7 @@ import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
 import javax.annotation.Nonnull;
 import javax.annotation.concurrent.GuardedBy;
 import net.pms.Messages;
@@ -42,22 +43,24 @@ import net.pms.store.container.DVDISOFile;
 import net.pms.store.container.PlaylistFolder;
 import net.pms.store.container.RealFolder;
 import net.pms.store.container.VirtualFolder;
-import net.pms.store.item.RealFile;
 import net.pms.util.FileUtil;
 import net.pms.util.FileWatcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class MediaScanner extends StoreContainer implements SharedContentListener {
+public class MediaScanner implements SharedContentListener {
 
 	private static final Logger LOGGER = LoggerFactory.getLogger(MediaScanner.class);
 	private static final String ENTRY_CREATE = StandardWatchEventKinds.ENTRY_CREATE.name();
 	private static final String ENTRY_DELETE = StandardWatchEventKinds.ENTRY_DELETE.name();
 	private static final String ENTRY_MODIFY = StandardWatchEventKinds.ENTRY_MODIFY.name();
 	private static final Object DEFAULT_FOLDERS_LOCK = new Object();
+	private static final ReentrantLock SCANNER_LOCK = new ReentrantLock();
 	private static final List<FileWatcher.Watch> MEDIA_FILEWATCHERS = new ArrayList<>();
 	private static final List<String> SHARED_FOLDERS = new ArrayList<>();
+	private static final Renderer RENDERER = MediaScannerDevice.getRenderer();
 	private static final MediaScanner INSTANCE = new MediaScanner();
+	private static final List<String> FILES_PARSING = Collections.synchronizedList(new ArrayList<>());
 
 	@GuardedBy("DEFAULT_FOLDERS_LOCK")
 	private static List<String> defaultFolders = null;
@@ -65,10 +68,19 @@ public class MediaScanner extends StoreContainer implements SharedContentListene
 	private static boolean running;
 
 	private MediaScanner() {
-		super(MediaScannerDevice.getRenderer(), "scanner", null);
 	}
 
-	private void startScan() {
+	@Override
+	public synchronized void updateSharedContent() {
+		setMediaFileWatchers();
+		setSharedFolders();
+	}
+
+	public static void init() {
+		SharedContentConfiguration.addListener(INSTANCE);
+	}
+
+	private static void startScan() {
 		if (running) {
 			throw new IllegalStateException("Can't scan when scan in progress");
 		}
@@ -76,15 +88,15 @@ public class MediaScanner extends StoreContainer implements SharedContentListene
 		reset();
 		GuiManager.setMediaScanStatus(true);
 
-		discoverChildren();
+		setSharedContent();
 
-		LOGGER.debug("Starting scan of: {}", this.getName());
+		LOGGER.debug("Starting media scanner");
 		if (running) {
 			Connection connection = null;
 			try {
 				connection = MediaDatabase.getConnectionIfAvailable();
 				if (connection != null) {
-					scan(this);
+					scan(RENDERER.getMediaStore());
 					// Running might have been set false during scan
 					if (running) {
 						MediaTableFiles.cleanup(connection);
@@ -100,29 +112,7 @@ public class MediaScanner extends StoreContainer implements SharedContentListene
 		GuiManager.setStatusLine(null);
 	}
 
-	/**
-	 * Starts partial rescan
-	 *
-	 * @param filename This is the partial root of the scan. If a file is given,
-	 * the parent folder will be scanned.
-	 */
-	private void scanFolder(String filename) {
-		if (isInSharedFolders(filename) || isInDefaultFolders(filename)) {
-			LOGGER.debug("rescanning file or folder : " + filename);
-
-			File file = new File(filename);
-			if (file.isFile()) {
-				file = file.getParentFile();
-			}
-			RealFolder dir = new RealFolder(renderer, file);
-			dir.doRefreshChildren();
-			scan(dir);
-		} else {
-			LOGGER.warn("given file or folder doesn't share same base path as this server : " + filename);
-		}
-	}
-
-	private void scan(StoreContainer resource) {
+	private static void scan(StoreContainer resource) {
 		if (running) {
 			for (StoreResource child : resource.getChildren()) {
 				// wait until the realtime lock is released before starting
@@ -148,7 +138,7 @@ public class MediaScanner extends StoreContainer implements SharedContentListene
 
 						storeContainer.discoverChildren();
 						if (child instanceof VirtualFolder virtualFolder) {
-							virtualFolder.analyzeChildren(-1, false);
+							virtualFolder.analyzeChildren();
 						}
 						storeContainer.setDiscovered(true);
 					}
@@ -167,38 +157,22 @@ public class MediaScanner extends StoreContainer implements SharedContentListene
 		}
 	}
 
-	private void reset() {
-		getChildren().clear();
-		setDiscovered(false);
+	private static void reset() {
+		RENDERER.getMediaStore().getChildren().clear();
+		RENDERER.getMediaStore().setDiscovered(false);
 	}
 
-	@Override
-	public void discoverChildren() {
-		if (isDiscovered()) {
+	private static void setSharedContent() {
+		if (RENDERER.getMediaStore().isDiscovered()) {
 			return;
 		}
 		List<SharedContent> sharedContents = SharedContentConfiguration.getSharedContentArray();
 		for (SharedContent sharedContent : sharedContents) {
 			if (sharedContent instanceof FolderContent folder && folder.getFile() != null && folder.isActive()) {
-				StoreResource realSystemFileResource = renderer.getMediaStore().createResourceFromFile(folder.getFile());
-				addChild(realSystemFileResource, true, false);
+				StoreResource realSystemFileResource = RENDERER.getMediaStore().createResourceFromFile(folder.getFile());
+				RENDERER.getMediaStore().addChild(realSystemFileResource);
 			}
 		}
-	}
-
-	@Override
-	public synchronized void updateSharedContent() {
-		setMediaFileWatchers();
-		setSharedFolders();
-	}
-
-	@Override
-	public String getName() {
-		return "scanner";
-	}
-
-	public static void init() {
-		SharedContentConfiguration.addListener(INSTANCE);
 	}
 
 	public static boolean isMediaScanRunning() {
@@ -211,10 +185,15 @@ public class MediaScanner extends StoreContainer implements SharedContentListene
 		} else {
 			Runnable scan = () -> {
 				try {
-					if (INSTANCE.getDefaultRenderer() != null) {
+					if (RENDERER != null) {
 						LOGGER.info("Media scan started");
 						long start = System.currentTimeMillis();
-						INSTANCE.startScan();
+						try {
+							SCANNER_LOCK.lock();
+							startScan();
+						} finally {
+							SCANNER_LOCK.unlock();
+						}
 						LOGGER.info("Media scan completed in {} seconds", ((System.currentTimeMillis() - start) / 1000));
 						LOGGER.info("Database analyze started");
 						start = System.currentTimeMillis();
@@ -240,15 +219,84 @@ public class MediaScanner extends StoreContainer implements SharedContentListene
 		}
 	}
 
-	public static void scanFileOrFolder(String filename) {
+	/**
+	 * only used by nextcpapi
+	 */
+	public static void backgroundScanFileOrFolder(String filename) {
 		if (!isMediaScanRunning()) {
 			Runnable scan = () -> {
-				if (INSTANCE.getDefaultRenderer() != null) {
-					INSTANCE.scanFolder(filename);
+				if (RENDERER != null) {
+					scanFileOrFolder(filename);
 				}
 			};
-			Thread scanThread = new Thread(scan, "rescanFileOrFolder");
+			Thread scanThread = new Thread(scan, "scanFileOrFolder");
 			scanThread.start();
+		}
+	}
+
+	/**
+	 * Starts partial rescan.
+	 *
+	 * @param filename This is the partial root of the scan. If a file is given,
+	 * the parent folder will be scanned.
+	 */
+	private static void scanFileOrFolder(String filename) {
+		try {
+			SCANNER_LOCK.lock();
+			reset();
+			internalScanFileOrFolder(filename);
+			reset();
+		} finally {
+			SCANNER_LOCK.unlock();
+		}
+	}
+
+	/**
+	 * Starts partial rescan.
+	 *
+	 * @param filename This is the partial root of the scan. If a file is given,
+	 * the parent folder will be scanned.
+	 */
+	private static void internalScanFileOrFolder(String filename) {
+		if (isInSharedFolders(filename) || isInDefaultFolders(filename)) {
+			LOGGER.debug("Scanning file or folder : " + filename);
+
+			File file = new File(filename);
+			if (!file.exists()) {
+				LOGGER.debug("Not scanning file or folder that no longer exists: " + filename);
+				return;
+			}
+			if (file.isFile()) {
+				file = file.getParentFile();
+				LOGGER.debug("Scanning folder \"{}\" for file \"{}\"", file.getAbsolutePath(), filename);
+			} else {
+				LOGGER.debug("Scanning folder \"{}\"", file.getAbsolutePath());
+			}
+			List<StoreResource> systemFileResources = RENDERER.getMediaStore().findSystemFileResources(file);
+			if (systemFileResources.isEmpty()) {
+				//not yet discovered or root path outside shared folders ?
+				String parent = file.getParentFile().getAbsolutePath();
+				if (isInSharedFolders(parent)) {
+					internalScanFileOrFolder(parent);
+					systemFileResources = RENDERER.getMediaStore().findSystemFileResources(file);
+				}
+			}
+			if (!systemFileResources.isEmpty()) {
+				//if it is still empty, it mean the tree is no more accessible
+				for (StoreResource storeResource : systemFileResources) {
+					if (storeResource instanceof StoreContainer storeContainer) {
+						storeContainer.discoverChildren();
+						if (storeResource instanceof VirtualFolder virtualFolder) {
+							virtualFolder.doRefreshChildren();
+						}
+						storeContainer.setDiscovered(true);
+					}
+				}
+			} else {
+				LOGGER.warn("Given folder was not found in store : " + file.getAbsolutePath());
+			}
+		} else {
+			LOGGER.warn("Given file or folder doesn't share same base path as this server : " + filename);
 		}
 	}
 
@@ -296,17 +344,55 @@ public class MediaScanner extends StoreContainer implements SharedContentListene
 	}
 
 	/**
-	 * Advise renderer for added file.
+	 * Threaded parses a file so it gets parsed and added to the database along the way.
 	 *
-	 * @param filename the file added
+	 * @param file the file to parse
 	 */
-	private static void addFileEntry(String filename) {
-		LOGGER.trace("File {} was created on the hard drive", filename);
-		if (parseFileEntry(new File(filename))) {
-			for (Renderer renderer : ConnectedRenderers.getConnectedRenderers()) {
-				renderer.getMediaStore().fileAdded(filename);
+	private static void parseFileEntry(File file, boolean advise) {
+		String filename = file.getAbsolutePath();
+		synchronized (FILES_PARSING) {
+			if (FILES_PARSING.contains(filename)) {
+				//parsing of this file is already in progress
+				return;
+			} else {
+				FILES_PARSING.add(filename);
 			}
 		}
+		Runnable r = () -> {
+			try {
+				if (advise) {
+					LOGGER.debug("File {} was created on the hard drive", filename);
+				}
+				long currentSize = file.length();
+				//wait 500 ms
+				Thread.sleep(500);
+				//Check if size changed (copying, downloading)
+				while (file.exists() && (currentSize != file.length() || FileUtil.isLocked(file))) {
+					//loop until file size is not changing anymore and file is unlocked.
+					LOGGER.trace("Waiting file {} is fully written", filename);
+					currentSize = file.length();
+					Thread.sleep(500);
+				}
+				//here the file should be fully written, deleted or moved.
+				synchronized (FILES_PARSING) {
+					FILES_PARSING.remove(filename);
+				}
+				if (file.exists()) {
+					LOGGER.debug("Analyzing file {}", filename);
+					if (parseFileEntry(file) && advise) {
+						//Advise renderers for added file.
+						for (Renderer connectedRenderer : ConnectedRenderers.getConnectedRenderers()) {
+							connectedRenderer.getMediaStore().fileAdded(file);
+						}
+					}
+				} else {
+					LOGGER.debug("File {} does not more exists", filename);
+				}
+			} catch (InterruptedException ex) {
+				Thread.currentThread().interrupt();
+			}
+		};
+		new Thread(r, "MediaScanner File Parser").start();
 	}
 
 	/**
@@ -330,63 +416,72 @@ public class MediaScanner extends StoreContainer implements SharedContentListene
 			return false;
 		}
 
-		// TODO: Can this use UnattachedFolder and add instead?
-		Renderer renderer = MediaScannerDevice.getRenderer();
-		RealFile rf = new RealFile(renderer, file);
-		rf.setParent(new StoreContainer(renderer, null, null));
-		rf.resolveFormat();
-		rf.syncResolve();
+		if (!isInSharedFolders(file.getAbsolutePath())) {
+			LOGGER.debug("File will not be parsed because it is not in a shared folder");
+			return false;
+		}
 
-		if (rf.isValid()) {
-			LOGGER.info("New file {} was detected and added to the media store", file.getName());
-			MediaStoreIds.incrementSystemUpdateId();
-
-			/*
-			 * Something about this process causes Java to hold onto the
-			 * file, which prevents things happening to it on the filesystem
-			 * until the garbage collector runs.
-			 * Some sources say it is a symptom of the nio namespace itself
-			 * and the fix is to use older syntax, and others say other things,
-			 * but until we have a real fix for it we ask Java to collect the
-			 * garbage. It might not do it, but usually it does, which is better
-			 * than what we had before.
-			 */
-			if (FileUtil.isLocked(file)) {
-				System.gc();
-				System.runFinalization();
+		StoreResource rf = RENDERER.getMediaStore().createResourceFromFile(file);
+		if (rf != null) {
+			if (rf instanceof StoreItem storeItem) {
+				storeItem.resolveFormat();
 			}
+			rf.syncResolve();
+			if (rf.isValid()) {
+				LOGGER.info("New file {} was detected and added to the media store", file.getName());
+				MediaStoreIds.incrementSystemUpdateId();
 
-			return true;
+				/*
+				 * Something about this process causes Java to hold onto the
+				 * file, which prevents things happening to it on the filesystem
+				 * until the garbage collector runs.
+				 * Some sources say it is a symptom of the nio namespace itself
+				 * and the fix is to use older syntax, and others say other things,
+				 * but until we have a real fix for it we ask Java to collect the
+				 * garbage. It might not do it, but usually it does, which is better
+				 * than what we had before.
+				 */
+				if (FileUtil.isLocked(file)) {
+					System.gc();
+				}
+
+				return true;
+			}
 		} else {
 			LOGGER.trace("File {} was not recognized as valid media so was not added to the media store", file.getName());
 		}
 		return false;
 	}
 
-	private static void addFolderEntry(String filename) {
-		LOGGER.trace("Folder {} was created on the hard drive", filename);
-		for (Renderer renderer : ConnectedRenderers.getConnectedRenderers()) {
-			renderer.getMediaStore().fileAdded(filename);
+	private static void addFolderEntry(File directory) {
+		LOGGER.trace("Folder {} was created on the hard drive", directory);
+		if (RENDERER.getUmsConfiguration().getIgnoredFolderNames().contains(directory.getName())) {
+			LOGGER.debug("Ignoring {} because it is in the ignored folders list", directory.getName());
+			return;
 		}
-		File[] files = new File(filename).listFiles();
+		for (Renderer connectedRenderer : ConnectedRenderers.getConnectedRenderers()) {
+			connectedRenderer.getMediaStore().fileAdded(directory);
+		}
+		File[] files = directory.listFiles();
 		if (files != null) {
-			LOGGER.trace("Crawling {}", filename);
+			LOGGER.trace("Crawling {}", directory.getName());
 			for (File file : files) {
 				if (file.isFile()) {
-					LOGGER.trace("File {} found in {}", file.getName(), filename);
+					LOGGER.trace("File {} found in {}", file.getName(), directory.getName());
 					parseFileEntry(file);
 				}
 			}
 		} else {
-			LOGGER.trace("Folder {} is empty", filename);
+			LOGGER.trace("Folder {} is empty", directory.getName());
 		}
 	}
 
 	private static void removeFolderEntry(String filename) {
 		LOGGER.trace("Folder {} was deleted or moved on the hard drive, removing all files within it from the database", filename);
 		//folder may be empty
-		for (Renderer renderer : ConnectedRenderers.getConnectedRenderers()) {
-			renderer.getMediaStore().fileRemoved(filename);
+		File folder = new File(filename);
+		for (Renderer connectedRenderer : ConnectedRenderers.getConnectedRenderers()) {
+			connectedRenderer.getMediaStore().fileRemoved(folder);
 		}
 		if (MediaInfoStore.removeMediaEntriesInFolder(filename)) {
 			MediaStoreIds.incrementSystemUpdateId();
@@ -396,8 +491,9 @@ public class MediaScanner extends StoreContainer implements SharedContentListene
 	private static void removeFileEntry(String filename) {
 		LOGGER.info("File {} was deleted or moved on the hard drive, removing it from the database", filename);
 		if (MediaInfoStore.removeMediaEntry(filename)) {
-			for (Renderer renderer : ConnectedRenderers.getConnectedRenderers()) {
-				renderer.getMediaStore().fileRemoved(filename);
+			File file = new File(filename);
+			for (Renderer connectedRenderer : ConnectedRenderers.getConnectedRenderers()) {
+				connectedRenderer.getMediaStore().fileRemoved(file);
 			}
 			MediaStoreIds.incrementSystemUpdateId();
 		}
@@ -416,17 +512,17 @@ public class MediaScanner extends StoreContainer implements SharedContentListene
 			 */
 			if (isDir) {
 				if (ENTRY_CREATE.equals(event)) {
-					addFolderEntry(filename);
+					addFolderEntry(new File(filename));
 				} else if (ENTRY_DELETE.equals(event)) {
 					removeFolderEntry(filename);
 				}
 			} else {
 				if (ENTRY_CREATE.equals(event)) {
-					addFileEntry(filename);
+					parseFileEntry(new File(filename), true);
 				} else if (ENTRY_DELETE.equals(event)) {
 					removeFileEntry(filename);
 				} else {
-					parseFileEntry(new File(filename));
+					parseFileEntry(new File(filename), false);
 				}
 			}
 		}
@@ -446,14 +542,18 @@ public class MediaScanner extends StoreContainer implements SharedContentListene
 			FileWatcher.remove(watcher);
 		}
 		MEDIA_FILEWATCHERS.clear();
+		List<String> ignoredFolderNames = RENDERER.getUmsConfiguration().getIgnoredFolderNames();
 		for (File file : SharedContentConfiguration.getMonitoredFolders()) {
 			if (file.exists()) {
 				if (!file.isDirectory()) {
 					LOGGER.trace("Skip adding a FileWatcher for non-folder \"{}\"", file);
+				} else if (ignoredFolderNames.contains(file.getName())) {
+					LOGGER.debug("Skip adding a FileWatcher for \"{}\" because it is in the ignored folders list", file.getName());
 				} else {
 					LOGGER.trace("Creating FileWatcher for " + file.toString());
 					try {
 						FileWatcher.Watch watcher = new FileWatcher.Watch(file.toString() + File.separator + "**", MEDIA_RESCANNER);
+						watcher.setIgnoredFolderNames(ignoredFolderNames);
 						MEDIA_FILEWATCHERS.add(watcher);
 						FileWatcher.add(watcher);
 					} catch (Exception e) {

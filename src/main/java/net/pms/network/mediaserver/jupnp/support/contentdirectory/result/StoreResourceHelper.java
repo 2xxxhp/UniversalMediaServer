@@ -87,12 +87,12 @@ public class StoreResourceHelper {
 	private StoreResourceHelper() {
 	}
 
-	public static final BaseObject getBaseObject(StoreResource resource) {
+	public static final BaseObject getBaseObject(StoreResource resource, String filter) {
 		try {
 			if (resource instanceof StoreContainer container) {
-				return getContainer(container);
+				return getContainer(container, filter);
 			} else if (resource instanceof StoreItem item) {
-				return getItem(item);
+				return getItem(item, filter);
 			}
 		} catch (Exception ex) {
 			LOGGER.debug("", ex);
@@ -100,7 +100,7 @@ public class StoreResourceHelper {
 		return null;
 	}
 
-	public static final Container getContainer(StoreContainer container) {
+	public static final Container getContainer(StoreContainer container, String filter) {
 		final Renderer renderer = container.getDefaultRenderer();
 		final MediaInfo mediaInfo = container.getMediaInfo();
 		final MediaType mediaType = mediaInfo != null ? mediaInfo.getMediaType() : MediaType.UNKNOWN;
@@ -161,9 +161,6 @@ public class StoreResourceHelper {
 		) {
 			title = FullyPlayed.addFullyPlayedNamePrefix(title, container);
 		}
-		if (container instanceof VirtualFolderDbId) {
-			title = container.getName();
-		}
 
 		result.setTitle(renderer.getDcTitle(title, container.getDisplayNameSuffix(), container));
 		if (renderer.isSendFolderThumbnails() || container instanceof DVDISOFile) {
@@ -180,7 +177,7 @@ public class StoreResourceHelper {
 		return result;
 	}
 
-	public static final Item getItem(StoreItem item) {
+	public static final Item getItem(StoreItem item, String filter) {
 		final Renderer renderer = item.getDefaultRenderer();
 		final Engine engine = item.getEngine();
 		final MediaInfo mediaInfo = item.getMediaInfo();
@@ -518,6 +515,8 @@ public class StoreResourceHelper {
 							transcodedExtension = "_transcoded_to.m3u8";
 						} else if (renderer.isTranscodeToMPEGTS()) {
 							transcodedExtension = "_transcoded_to.ts";
+						} else if (renderer.isTranscodeToMP4H265AC3()) {
+							transcodedExtension = "_transcoded_to.mp4";
 						} else if (renderer.isTranscodeToWMV() && !xbox360) {
 							transcodedExtension = "_transcoded_to.wmv";
 						} else {
@@ -534,7 +533,7 @@ public class StoreResourceHelper {
 					}
 				}
 
-				res.setValue(URI.create(item.getFileURL() + transcodedExtension));
+				res.setValue(URI.create(item.getMediaURL() + transcodedExtension));
 				result.addResource(res);
 			}
 
@@ -791,11 +790,11 @@ public class StoreResourceHelper {
 		if (!resElement.isResolutionKnown() && DLNAImageProfile.JPEG_RES_H_V.equals(resElement.getProfile())) {
 			throw new IllegalArgumentException("Resolution cannot be unknown for DLNAImageProfile.JPEG_RES_H_V");
 		}
-		String url;
+		String url = null;
 		if (resElement.isThumbnail()) {
 			url = resource.getThumbnailURL(resElement.getProfile());
-		} else {
-			url = resource.getMediaURL((DLNAImageProfile.JPEG_RES_H_V.equals(resElement.getProfile()) ?
+		} else if (resource instanceof StoreItem item) {
+			url = item.getMediaURL((DLNAImageProfile.JPEG_RES_H_V.equals(resElement.getProfile()) ?
 				"JPEG_RES" + resElement.getWidth() + "x" + resElement.getHeight() :
 				resElement.getProfile().toString()) + "_");
 		}
@@ -803,7 +802,7 @@ public class StoreResourceHelper {
 			String ciFlag;
 			/*
 			 * Some Panasonic TV's can't handle if the thumbnails have the CI
-			 * flag set to 0 while the main resource doesn't have a CI flag.
+			 * flag set to 0 while the main item doesn't have a CI flag.
 			 * DLNA dictates that a missing CI flag should be interpreted as if
 			 * it were 0, so the result should be the same.
 			 */

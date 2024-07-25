@@ -29,7 +29,7 @@ interface Props {
   children?: ReactNode
 }
 
-export const ServerEventProvider = ({ children, ...props }: Props) => {
+export const ServerEventProvider = ({ children }: Props) => {
   const [started, setStarted] = useState<boolean>(false);
   const [connectionStatus, setConnectionStatus] = useState<number>(0);
   const [memory, setMemory] = useState<{ max: number, used: number, dbcache: number, buffer: number }>({ max: 0, used: 0, dbcache: 0, buffer: 0 });
@@ -41,8 +41,6 @@ export const ServerEventProvider = ({ children, ...props }: Props) => {
   const [rendererActions] = useState([] as any[]);
   const [hasNewLogLine, setNewLogLine] = useState(false);
   const [newLogLines] = useState([] as string[]);
-  const [statusLine, setStatusLine] = useState<string|null>(null);
-  const [secondaryStatusLine, setSecondaryStatusLine] = useState<string|null>(null);
   const session = useContext(SessionContext);
   const i18n = useContext(I18nContext);
   const main = useContext(MainContext);
@@ -68,8 +66,8 @@ export const ServerEventProvider = ({ children, ...props }: Props) => {
       showNotification({
         id: 'connection-lost',
         color: 'orange',
-        title: i18n.get['Warning'],
-        message: i18n.get['UniversalMediaServerUnreachable'],
+        title: i18n.get('Warning'),
+        message: i18n.get('UniversalMediaServerUnreachable'),
         autoClose: false
       });
     }
@@ -79,6 +77,14 @@ export const ServerEventProvider = ({ children, ...props }: Props) => {
         hideNotification('connection-lost');
         notified = false;
         setConnectionStatus(1);
+      } else if (event.status == 401) {
+        //reload Unauthorized
+        window.location.reload();
+      } else if (event.status == 403) {
+        //stop Forbidden
+        console.log('SSE Forbidden');
+      } else {
+        throw new Error('Expected content-type to be \'text/event-stream\'');
       }
     };
 
@@ -152,14 +158,14 @@ export const ServerEventProvider = ({ children, ...props }: Props) => {
         onmessage(event: EventSourceMessage) {
           onMessage(event);
         },
-        onerror(event: Response) { onError(); },
+        onerror(_event: Response) { onError(); },
         onclose() { onClose(); },
         openWhenHidden: true,
       });
     };
 
     startSse();
-  }, [started, session, i18n, rendererActions, newLogLines]);
+  }, [started, session, rendererActions, newLogLines]);
 
   const getRendererAction = () => {
     let result = null;
@@ -194,8 +200,6 @@ export const ServerEventProvider = ({ children, ...props }: Props) => {
       getRendererAction: getRendererAction,
       hasNewLogLine: hasNewLogLine,
       getNewLogLine: getNewLogLine,
-      statusLine: statusLine,
-      secondaryStatusLine: secondaryStatusLine,
     }}>
       {children}
     </Provider>

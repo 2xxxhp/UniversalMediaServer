@@ -99,7 +99,7 @@ public class FFmpegParser {
 				parse(media, inputFile);
 				if (
 					file != null &&
-					"mpegts".equals(media.getContainer()) &&
+					FormatConfiguration.MPEGTS.equals(media.getContainer()) &&
 					media.getDefaultVideoTrack() != null &&
 					media.getDefaultVideoTrack().isH264() &&
 					media.getDurationInSeconds() == 0
@@ -283,6 +283,9 @@ public class FFmpegParser {
 						if ("mov".equals(media.getContainer())) {
 							media.setContainer(line.substring(line.lastIndexOf('.') + 1, line.lastIndexOf('\'')).trim());
 							LOGGER.trace("Setting container to " + media.getContainer() + " from the filename. To prevent false-positives, use MediaInfo=true in the renderer config.");
+						}
+						if ("matroska".equals(media.getContainer())) {
+							media.setContainer(FormatConfiguration.MKV);
 						}
 					} else {
 						matches = false;

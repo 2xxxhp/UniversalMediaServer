@@ -144,8 +144,9 @@ public class Renderer extends RendererDeviceConfiguration {
 
 	/**
 	 * RendererName: Determines the name that is displayed in the UMS user
-	 * interface when this renderer connects. Default value is "Unknown
-	 * renderer".
+	 * interface when this renderer connects.
+	 *
+	 * Default value is "UnknownRenderer".
 	 *
 	 * @return The renderer name.
 	 */
@@ -243,10 +244,6 @@ public class Renderer extends RendererDeviceConfiguration {
 	@Override
 	protected void uuidChanged() {
 		resetRenderer();
-	}
-
-	public void delete(int delay) {
-		ConnectedRenderers.delete(this, delay);
 	}
 
 	/**

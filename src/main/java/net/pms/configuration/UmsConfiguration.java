@@ -89,7 +89,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Container for all configurable UMS settings. Settings are typically defined by three things:
+ * Container for all configurable UMS settings.
+ * <p>
+ * Settings are typically defined by three things:
  * a unique key for use in the configuration file "UMS.conf", a getter (and setter) method and
  * a default value. When a key cannot be found in the current configuration, the getter will
  * return a default value. Setters only store a value, they do not permanently save it to
@@ -218,7 +220,6 @@ public class UmsConfiguration extends BaseConfiguration {
 	private static final String KEY_AUDIO_CHANNEL_COUNT = "audio_channels";
 	private static final String KEY_AUDIO_EMBED_DTS_IN_PCM = "audio_embed_dts_in_pcm";
 	private static final String KEY_AUDIO_LANGUAGES = "audio_languages";
-	private static final String KEY_AUDIO_LIKES_IN_ROOT_FOLDER = "audio_likes_visible_root";
 	private static final String KEY_AUDIO_REMUX_AC3 = "audio_remux_ac3";
 	private static final String KEY_AUDIO_RESAMPLE = "audio_resample";
 	private static final String KEY_AUDIO_SUB_LANGS = "audio_subtitles_languages";
@@ -238,7 +239,6 @@ public class UmsConfiguration extends BaseConfiguration {
 	private static final String KEY_ASS_OUTLINE = "subtitles_ass_outline";
 	private static final String KEY_ASS_SCALE = "subtitles_ass_scale";
 	private static final String KEY_ASS_SHADOW = "subtitles_ass_shadow";
-	private static final String KEY_API_KEY = "api_key";
 	private static final String KEY_BLOCK_NETWORK_DEVICES_BY_DEFAULT = "block_network_devices_by_default";
 	private static final String KEY_BLOCK_RENDERERS_BY_DEFAULT = "block_renderers_by_default";
 	private static final String KEY_CHAPTER_INTERVAL = "chapter_interval";
@@ -325,7 +325,6 @@ public class UmsConfiguration extends BaseConfiguration {
 	private static final String KEY_LOGGING_SYSLOG_PORT = "logging_syslog_port";
 	private static final String KEY_LOGGING_USE_SYSLOG = "logging_use_syslog";
 	private static final String KEY_LOG_DATABASE = "log_database";
-	private static final String KEY_MANAGED_PLAYLIST_FOLDER = "managed_playlist_folder";
 	private static final String KEY_MAX_AUDIO_BUFFER = "maximum_audio_buffer_size";
 	private static final String KEY_MAX_BITRATE = "maximum_bitrate";
 	private static final String KEY_MAX_MEMORY_BUFFER_SIZE = "maximum_video_buffer_size";
@@ -364,6 +363,8 @@ public class UmsConfiguration extends BaseConfiguration {
 	private static final String KEY_MUX_ALLAUDIOTRACKS = "tsmuxer_mux_all_audiotracks";
 	private static final String KEY_NETWORK_DEVICES_FILTER = "network_devices_filter";
 	private static final String KEY_NETWORK_INTERFACE = "network_interface";
+	private static final String KEY_NEXTCP_API_KEY = "nextcp_api_key";
+	private static final String KEY_NEXTCP_AUDIO_LIKES_IN_ROOT_FOLDER = "audio_likes_visible_root";
 	private static final String KEY_NUMBER_OF_CPU_CORES = "number_of_cpu_cores";
 	private static final String KEY_OPEN_ARCHIVES = "enable_archive_browsing";
 	private static final String KEY_OVERSCAN = "mencoder_overscan";
@@ -484,7 +485,9 @@ public class UmsConfiguration extends BaseConfiguration {
 		new AbstractMap.SimpleEntry<>("web_loop_video", KEY_WEB_PLAYER_LOOP_VIDEO),
 		//since 11.6
 		new AbstractMap.SimpleEntry<>("fmpeg_sox", KEY_FFMPEG_SOX),
-		new AbstractMap.SimpleEntry<>("ALIVE_delay", KEY_UPNP_ALIVE_DELAY)
+		new AbstractMap.SimpleEntry<>("ALIVE_delay", KEY_UPNP_ALIVE_DELAY),
+		//since 14
+		new AbstractMap.SimpleEntry<>("api_key", KEY_NEXTCP_API_KEY)
 	);
 
 	/**
@@ -566,7 +569,7 @@ public class UmsConfiguration extends BaseConfiguration {
 	);
 
 	/**
-	 * The set of keys defining when the renderers has to rebuid their media store
+	 * The set of keys defining when the renderers has to rebuild their media store
 	 * due to a configuration change.
 	 */
 	public static final Set<String> NEED_RENDERERS_MEDIA_STORE_RELOAD_FLAGS = Set.of(
@@ -1552,12 +1555,16 @@ public class UmsConfiguration extends BaseConfiguration {
 		return getInt(KEY_AUDIO_BITRATE, 448);
 	}
 
-	public String getApiKey() {
-		return getString(KEY_API_KEY, "");
+	public boolean useNextcpApi() {
+		return  !"".equals(getNextcpApiKey());
+	}
+
+	public String getNextcpApiKey() {
+		return getString(KEY_NEXTCP_API_KEY, "");
 	}
 
 	public final String getJwtSecret() {
-		//don't use RendererConfiguration.getString as it will log the value
+		//don't use BaseConfiguration.getString as it will log the value
 		//jwt_secret can elevate users !!!
 		return configuration.getString(KEY_JWT_SIGNER_SECRET, "");
 	}
@@ -2008,7 +2015,7 @@ public class UmsConfiguration extends BaseConfiguration {
 	public String getAudioLanguages() {
 		return configurationReader.getPossiblyBlankConfigurationString(
 				KEY_AUDIO_LANGUAGES,
-				Messages.getString("AudioLanguages")
+				Messages.getConfigurationString("AudioLanguages")
 		);
 	}
 
@@ -2024,7 +2031,7 @@ public class UmsConfiguration extends BaseConfiguration {
 	public String getSubtitlesLanguages() {
 		return configurationReader.getPossiblyBlankConfigurationString(
 				KEY_SUBTITLES_LANGUAGES,
-				Messages.getString("SubtitlesLanguages")
+				Messages.getConfigurationString("SubtitlesLanguages")
 		);
 	}
 
@@ -2063,7 +2070,7 @@ public class UmsConfiguration extends BaseConfiguration {
 	public String getAudioSubLanguages() {
 		return configurationReader.getPossiblyBlankConfigurationString(
 				KEY_AUDIO_SUB_LANGS,
-				Messages.getString("AudioSubtitlesPairs")
+				Messages.getConfigurationString("AudioSubtitlesPairs")
 		);
 	}
 
@@ -2298,7 +2305,7 @@ public class UmsConfiguration extends BaseConfiguration {
 	 * Set to true if MEncoder should use the deinterlace filter, false
 	 * otherwise.
 	 *
-	 * @param value Set ot true if the deinterlace filter should be used.
+	 * @param value Set to true if the deinterlace filter should be used.
 	 */
 	public void setMencoderYadif(boolean value) {
 		configuration.setProperty(KEY_MENCODER_YADIF, value);
@@ -2662,7 +2669,7 @@ public class UmsConfiguration extends BaseConfiguration {
 			} catch (IOException e) {
 				if (!PlatformUtils.INSTANCE.isAdmin()) {
 					try {
-						GuiManager.showErrorMessage(Messages.getString("UmsMustRunAdministrator"), Messages.getString("PermissionsError"));
+						GuiManager.showErrorMessage(Messages.getGuiString("UmsMustRunAdministrator"), Messages.getGuiString("PermissionsError"));
 					} catch (NullPointerException e2) {
 						// This happens on the initial program load, ignore it
 					}
@@ -2912,7 +2919,7 @@ public class UmsConfiguration extends BaseConfiguration {
 	}
 
 	public String getFFmpegGPUDecodingAccelerationMethod() {
-		return getString(KEY_FFMPEG_GPU_DECODING_ACCELERATION_METHOD, Messages.getString("None_lowercase"));
+		return getString(KEY_FFMPEG_GPU_DECODING_ACCELERATION_METHOD, "none");
 	}
 
 	public String getFFmpegGPUH264EncodingAccelerationMethod() {
@@ -2944,7 +2951,7 @@ public class UmsConfiguration extends BaseConfiguration {
 	}
 
 	public String[] getFFmpegAvailableGPUDecodingAccelerationMethods() {
-		return getString(KEY_FFMPEG_AVAILABLE_GPU_ACCELERATION_METHODS, Messages.getString("None_lowercase")).split(",");
+		return getString(KEY_FFMPEG_AVAILABLE_GPU_ACCELERATION_METHODS, "none").split(",");
 	}
 
 	public static String[] getFFmpegAvailableGPUH264EncodingAccelerationMethods() {
@@ -3631,6 +3638,18 @@ public class UmsConfiguration extends BaseConfiguration {
 		LOGGER.info("Configuration saved to \"{}\"", PROFILE_PATH);
 	}
 
+	/**
+	 * Save the configuration changes immediately to the configuration file and
+	 * not wait for the automatic saving.
+	 */
+	public void saveConfiguration() {
+		try {
+			save();
+		} catch (ConfigurationException e) {
+			LOGGER.error("Could not save configuration", e);
+		}
+	}
+
 	private ArrayList<String> ignoredFolderNames;
 
 	/**
@@ -3638,16 +3657,15 @@ public class UmsConfiguration extends BaseConfiguration {
 	 */
 	private boolean ignoredFolderNamesRead;
 
-
 	/**
 	 * @return The {@link List} of {@link Path}s of ignored folder names.
 	 */
 	@Nonnull
-	public ArrayList<String> getIgnoredFolderNames() {
+	public List<String> getIgnoredFolderNames() {
 		if (!ignoredFolderNamesRead) {
 			String ignoredFolderNamesString = configuration.getString(KEY_FOLDER_NAMES_IGNORED, ".unwanted");
 
-			ArrayList<String> folders = new ArrayList<>();
+			List<String> folders = new ArrayList<>();
 			if (ignoredFolderNamesString == null || ignoredFolderNamesString.length() == 0) {
 				return folders;
 			}
@@ -3829,6 +3847,10 @@ public class UmsConfiguration extends BaseConfiguration {
 
 	public boolean isDisableTranscoding() {
 		return getBoolean(KEY_DISABLE_TRANSCODING, false);
+	}
+
+	public void setDisableTranscoding(boolean value) {
+		configuration.setProperty(KEY_DISABLE_TRANSCODING, value);
 	}
 
 	public String getForceTranscodeForExtensions() {
@@ -4594,7 +4616,7 @@ public class UmsConfiguration extends BaseConfiguration {
 	 * @return The folder name.
 	 */
 	public String getTranscodeFolderName() {
-		return getString(KEY_TRANSCODE_FOLDER_NAME, Messages.getString("Transcode_FolderName"));
+		return getString(KEY_TRANSCODE_FOLDER_NAME, Messages.getConfigurationString("Transcode_FolderName"));
 	}
 
 	/**
@@ -4686,7 +4708,9 @@ public class UmsConfiguration extends BaseConfiguration {
 	}
 
 	public String getTmdbApiKey() {
-		return getString(KEY_TMDB_API_KEY, "");
+		//don't use BaseConfiguration.getString as it will log the value
+		//tmdb_api_key should stay secret !!!
+		return configuration.getString(KEY_TMDB_API_KEY, "");
 	}
 
 	public void setTmdbApiKey(String value) {
@@ -4794,7 +4818,7 @@ public class UmsConfiguration extends BaseConfiguration {
 	}
 
 	public boolean displayAudioLikesInRootFolder() {
-		return getBoolean(KEY_AUDIO_LIKES_IN_ROOT_FOLDER, false);
+		return getBoolean(KEY_NEXTCP_AUDIO_LIKES_IN_ROOT_FOLDER, false);
 	}
 
 	public int getLiveSubtitlesLimit() {
@@ -5308,10 +5332,6 @@ public class UmsConfiguration extends BaseConfiguration {
 		return getBoolean(KEY_CHROMECAST_DBG, false);
 	}
 
-	public String getManagedPlaylistFolder() {
-		return getString(KEY_MANAGED_PLAYLIST_FOLDER, "");
-	}
-
 	/**
 	 * Enable the automatically saving of modified properties to the disk.
 	 */
@@ -5553,7 +5573,7 @@ public class UmsConfiguration extends BaseConfiguration {
 		jObj.addProperty(KEY_AUDIO_CHANNEL_COUNT, "6");
 		jObj.addProperty(KEY_AUDIO_EMBED_DTS_IN_PCM, false);
 		jObj.addProperty(KEY_AUDIO_BITRATE, "448");
-		jObj.addProperty(KEY_AUDIO_LANGUAGES, Messages.getString("AudioLanguages"));
+		jObj.addProperty(KEY_AUDIO_LANGUAGES, Messages.getConfigurationString("AudioLanguages"));
 		jObj.addProperty(KEY_AUDIO_REMUX_AC3, true);
 		jObj.addProperty(KEY_AUDIO_RESAMPLE, true);
 		jObj.addProperty(KEY_AUDIO_SUB_LANGS, "");
@@ -5567,6 +5587,7 @@ public class UmsConfiguration extends BaseConfiguration {
 		jObj.addProperty(KEY_CHROMECAST_EXT, false);
 		jObj.addProperty(KEY_DISABLE_SUBTITLES, false);
 		jObj.addProperty(KEY_DISABLE_TRANSCODE_FOR_EXTENSIONS, "");
+		jObj.addProperty(KEY_DISABLE_TRANSCODING, false);
 		jObj.addProperty(KEY_OPEN_ARCHIVES, false);
 		jObj.addProperty(KEY_ENCODED_AUDIO_PASSTHROUGH, false);
 		JsonArray transcodingEngines = UmsConfiguration.getAllEnginesAsJsonArray();
@@ -5662,7 +5683,7 @@ public class UmsConfiguration extends BaseConfiguration {
 		jObj.addProperty(KEY_SORT_METHOD, "4");
 		jObj.addProperty(KEY_SUBS_INFO_LEVEL, "basic");
 		jObj.addProperty(KEY_SUBTITLES_CODEPAGE, "");
-		jObj.addProperty(KEY_SUBTITLES_LANGUAGES, Messages.getString("SubtitlesLanguages"));
+		jObj.addProperty(KEY_SUBTITLES_LANGUAGES, Messages.getConfigurationString("SubtitlesLanguages"));
 		jObj.addProperty(KEY_SUBS_COLOR, "0xFFFFFFFF");
 		jObj.addProperty(KEY_SUBS_FONT, "");
 		jObj.addProperty(KEY_ASS_MARGIN, 10);
